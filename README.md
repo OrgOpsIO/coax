@@ -1,126 +1,141 @@
 # coax
 
-**Typed, provider-agnostic, self-repairing structured output from LLMs.**
-Pure TypeScript — no native modules, no codegen, no DSL, no vendor lock-in.
+**A clean, provider-agnostic way to put LLMs into your software — with the good patterns built in.**
+Pure TypeScript. No native modules, no codegen, no DSL, no vendor lock-in.
 
-You define a [Zod](https://zod.dev) schema, coax coaxes the model into it: it uses the provider's native
-constrained-output mode, aggressively parses whatever comes back (markdown fences, malformed JSON, …), and
-if it still doesn't fit, it reprompts the model with the exact validation errors until it does.
+Configure your provider keys once, pick a model by name, hand it a [Zod](https://zod.dev) schema (or a
+prompt file), and get back typed, validated data — with retries, model fallback, and self-repair handled
+for you.
 
 ```bash
 npm install @orgops/coax zod
-# plus the SDK for the provider you use:
 npm install @anthropic-ai/sdk   # and/or: npm install openai
 ```
 
-## Quick start
+## One config, then beautiful calls
 
 ```ts
-import { createClient, anthropic } from "@orgops/coax";
+import { createAI } from "@orgops/coax";
 import { z } from "zod";
 
-const client = createClient({
-  provider: anthropic({ apiKey: process.env.ANTHROPIC_API_KEY!, model: "claude-sonnet-4-6" }),
+const ai = createAI({
+  providers: {
+    anthropic: process.env.ANTHROPIC_API_KEY!,   // string key, or { apiKey, baseURL }
+    openai: process.env.OPENAI_API_KEY!,
+  },
+  models: {
+    default: "anthropic:claude-sonnet-4-6",
+    smart:   { use: "anthropic:claude-opus-4-8", fallback: "anthropic:claude-sonnet-4-6" },
+    fast:    "anthropic:claude-haiku-4-5",
+    cheap:   "openai:gpt-5-mini",
+  },
+  defaults: { model: "default", maxRepairs: 2, retries: { attempts: 3 } },
+  onUsage: (usage, meta) => track(usage, meta),   // one hook for all your LLM cost/latency
 });
 
-const Field = z.object({
-  label: z.string(),
-  helpText: z.string().min(1), // ← a hard contract: the model cannot omit this
+// Structured — typed, validated, self-repairing:
+const { data } = await ai.object({
+  model: "smart",
+  schema: z.object({ title: z.string(), tags: z.array(z.string()).min(1) }),
+  system: "You label articles.",
+  prompt: article,
 });
+data.tags; // string[] — guaranteed
 
-const { data } = await client.object({
-  schema: Field,
-  system: "You design insurance calculator fields.",
-  prompt: "A field for the customer's date of birth.",
-});
-
-data.helpText; // string — typed and guaranteed non-empty
+// Free-form text:
+const { text } = await ai.text({ model: "fast", prompt: "Write a haiku about TypeScript." });
 ```
 
-## Provider-agnostic — the provider is data
+Switching provider is one word (`"anthropic:…"` → `"openai:…"`). Everything else stays the same.
 
-Swap one line. Nothing else changes.
+## Prompt files
+
+Keep prompts out of your code, versioned and reviewable, in a `.prompt.md`:
+
+```md
+---
+model: smart
+maxRepairs: 2
+---
+# SYSTEM
+You are an expert at {{ domain }}.
+
+# USER
+{{ input }}
+```
 
 ```ts
-import { openai } from "@orgops/coax";
+const classify = ai.prompt("./prompts/classify.prompt.md", { schema: LabelSchema });
+const { data } = await classify({ domain: "insurance", input: text });
+```
 
-const client = createClient({
-  provider: openai({ apiKey: process.env.OPENAI_API_KEY!, model: "gpt-5" }),
+No frontmatter/sections needed — a plain `.md` is just the user prompt. Pass `schema` for structured
+output, omit it for text.
+
+## Any provider
+
+`anthropic` and `openai` are built in. Plug in anything else (Gemini, a local model, a test mock) with a
+factory — it just implements the small `Provider` interface:
+
+```ts
+createAI({
+  providers: {
+    anthropic: process.env.ANTHROPIC_API_KEY!,
+    gemini: (model) => myGeminiProvider(model),   // (model: string) => Provider
+  },
+  models: { flash: "gemini:gemini-2.5-flash" },
 });
 ```
 
-Bring your own SDK instance (recommended when your app already has one):
+## What's built in (so you don't hand-roll it every time)
 
-```ts
-import Anthropic from "@anthropic-ai/sdk";
-anthropic({ client: new Anthropic(), model: "claude-sonnet-4-6" });
-```
-
-## What makes it robust
-
-- **Native constrained output** — Anthropic tool-use / OpenAI function-calling, so the model aims at the schema.
+- **Typed contracts** — your Zod schema *is* the spec. `z.string().min(1)` means the model can't return empty.
 - **Aggressive parsing** — strips ```` ```json ```` fences and repairs malformed JSON (unquoted keys, trailing
-  commas, single quotes, truncation) via [`jsonrepair`](https://github.com/josdejong/jsonrepair) before validation.
-- **Validate → repair** — on a Zod failure, coax reprompts with the concrete errors (up to `maxRepairs`, default 2).
-  Modern models correct almost always on the first repair.
+  commas, truncation) before validating.
+- **Validate → repair** — on a schema miss, coax reprompts with the exact errors (up to `maxRepairs`).
+- **Retries** — transient errors (429/5xx/network) retried with exponential backoff.
+- **Model fallback** — a model alias can name a `fallback`; used automatically when the primary fails.
+- **Usage** — one `onUsage(usage, meta)` hook across every call, plus summed `usage` on each result.
+- **Agent loops & vision** — discriminated-union steps and image/pdf media are first-class.
 
 ```ts
-await client.object({ schema, prompt, maxRepairs: 3 });
-// → { data, usage, model, repairs }   (repairs = 0 means valid first try)
+const { data, usage, repairs } = await ai.object({ schema, prompt, maxRepairs: 3 });
+// repairs === 0 → valid first try
 ```
 
-## Agent loops & unions
-
-A discriminated union is a typed "which tool" per turn — drive the loop yourself, coax types every step.
+### Agent loops
 
 ```ts
 const Step = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("fetch"), sections: z.array(z.string()) }),
+  z.object({ action: z.literal("search"), query: z.string() }),
   z.object({ action: z.literal("answer"), text: z.string() }),
 ]);
 
-const messages = [{ role: "user" as const, content: "..." }];
+const messages = [{ role: "user" as const, content: task }];
 while (true) {
-  const { data } = await client.object({ schema: Step, messages });
-  if (data.action === "answer") break;
-  // handle fetch, append the result to messages, loop…
+  const { data } = await ai.object({ model: "smart", schema: Step, messages });
+  if (data.action === "answer") return data.text;
+  messages.push({ role: "assistant", content: JSON.stringify(data) });
+  messages.push({ role: "user", content: await runSearch(data.query) });
 }
 ```
 
-## Vision
+### Vision
 
 ```ts
-await client.object({
+await ai.object({
   schema,
-  messages: [{
-    role: "user",
-    content: "Extract the fields from this form.",
-    media: [{ kind: "image", mediaType: "image/png", dataBase64: "…" }], // or kind: "pdf" (Anthropic)
-  }],
+  messages: [{ role: "user", content: "Extract the fields.", media: [{ kind: "image", mediaType: "image/png", dataBase64 }] }],
 });
-```
-
-## Free-form text
-
-```ts
-const { text } = await client.text({ system, prompt: "Write the offer HTML." });
-```
-
-## Observability
-
-```ts
-createClient({
-  provider,
-  onUsage: (usage, model) => record(usage, model), // fired per model call, incl. repair rounds
-});
-// object() also returns summed `usage` across all rounds.
 ```
 
 ## Design
 
-coax is intentionally small. The only vendor-specific surface is the `Provider` interface
-(`structured` + `text`) — implement it to add a provider. Everything else (schema, parsing, repair loop)
-is pure and unit-tested. Zod is a peer dependency; the SDKs are optional peers, imported lazily only when used.
+Small and unopinionated. The only vendor-specific surface is the `Provider` interface (`structured` +
+`text`); everything else — schema handling, aggressive parsing, the repair/retry/fallback loop, prompt
+files — is pure and unit-tested. Zod is a peer dependency; the SDKs are optional peers, imported lazily
+only when used. The high-level `createAI` is the recommended entry point; `createClient` (single provider,
+no config) is available for lower-level use.
 
 ## License
 
