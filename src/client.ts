@@ -1,5 +1,4 @@
-import { zodToJsonSchema } from "zod-to-json-schema";
-import type { ZodType } from "zod";
+import { z, type ZodType } from "zod";
 import { extractJson } from "./parse";
 import { addUsage, emptyUsage, type Message, type Provider, type Usage } from "./types";
 
@@ -81,7 +80,8 @@ export function createClient(opts: ClientOptions): Client {
 
     async object<T>(req: ObjectRequest<T>): Promise<ObjectResult<T>> {
       const schemaName = req.schemaName ?? "output";
-      const jsonSchema = zodToJsonSchema(req.schema as never, schemaName) as Record<string, unknown>;
+      // Zod 4's native JSON Schema. Drop `$schema` — providers want a bare parameters object.
+      const { $schema: _drop, ...jsonSchema } = z.toJSONSchema(req.schema as never) as Record<string, unknown>;
       const maxRepairs = req.maxRepairs ?? opts.defaultMaxRepairs ?? 2;
       const messages = toMessages(req.prompt, req.messages);
 
