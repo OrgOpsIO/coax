@@ -59,5 +59,19 @@
     "typescript": "^5.6.0",
     "vitest": "^3.0.0",
     "zod": "^3.25.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OrgOpsIO/coax.git"
+  },
+  "homepage": "https://github.com/OrgOpsIO/coax#readme",
+  "bugs": {
+    "url": "https://github.com/OrgOpsIO/coax/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
