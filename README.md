@@ -12,13 +12,16 @@ npm install @orgops/coax zod
 npm install @anthropic-ai/sdk   # and/or: npm install openai
 ```
 
-## One config, then beautiful calls
+## Configure once, use `ai` everywhere
+
+Set your keys and models in **one place** at startup. Then anywhere in your app just import `ai` — no
+threading an instance around, no `createAI` at every call site.
 
 ```ts
-import { createAI } from "@orgops/coax";
-import { z } from "zod";
+// coax.setup.ts — run once at startup (a Nuxt/Nitro server plugin, a Vite entry, your main.ts)
+import { configure } from "@orgops/coax";
 
-const ai = createAI({
+configure({
   providers: {
     anthropic: process.env.ANTHROPIC_API_KEY!,   // string key, or { apiKey, baseURL }
     openai: process.env.OPENAI_API_KEY!,
@@ -32,8 +35,13 @@ const ai = createAI({
   defaults: { model: "default", maxRepairs: 2, retries: { attempts: 3 } },
   onUsage: (usage, meta) => track(usage, meta),   // one hook for all your LLM cost/latency
 });
+```
 
-// Structured — typed, validated, self-repairing:
+```ts
+// anywhere else — no setup, no imports of an instance
+import { ai } from "@orgops/coax";
+import { z } from "zod";
+
 const { data } = await ai.object({
   model: "smart",
   schema: z.object({ title: z.string(), tags: z.array(z.string()).min(1) }),
@@ -42,11 +50,37 @@ const { data } = await ai.object({
 });
 data.tags; // string[] — guaranteed
 
-// Free-form text:
 const { text } = await ai.text({ model: "fast", prompt: "Write a haiku about TypeScript." });
 ```
 
-Switching provider is one word (`"anthropic:…"` → `"openai:…"`). Everything else stays the same.
+Using `ai` before `configure()` throws a clear error — so the setup is explicit and enforced. Switching
+provider is one word (`"anthropic:…"` → `"openai:…"`); everything else stays the same.
+
+### Nuxt / Nitro
+
+Keys live in `runtimeConfig` (from env); wire coax once in a server plugin, use `ai` in any route/service:
+
+```ts
+// server/plugins/coax.ts
+import { configure } from "@orgops/coax";
+export default defineNitroPlugin(() => {
+  const c = useRuntimeConfig();
+  configure({
+    providers: { anthropic: c.anthropicApiKey, openai: c.openaiApiKey },
+    models: { smart: "anthropic:claude-opus-4-8", fast: "anthropic:claude-haiku-4-5" },
+    onUsage: (usage, meta) => appendUsageEvent(usage, meta),
+  });
+});
+```
+
+### Explicit instance (libraries, tests, multiple configs)
+
+Prefer no global state? `createAI(config)` returns the same interface as an instance:
+
+```ts
+import { createAI } from "@orgops/coax";
+const ai = createAI({ providers: { … }, models: { … } });
+```
 
 ## Prompt files
 

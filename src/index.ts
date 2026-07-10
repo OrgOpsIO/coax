@@ -1,4 +1,6 @@
-// High-level, config-driven interface (recommended entry point).
+// Ambient app-wide client: configure() once at startup, then use `ai` anywhere (recommended for apps).
+export { configure, ai, isConfigured, reset } from "./runtime";
+// Explicit instance (recommended for libraries, tests, multiple configs).
 export { createAI } from "./ai";
 export type { AI, ObjectCall, TextCall } from "./ai";
 export type { AIConfig, ProviderConfig, ModelConfig, RetryConfig, CallDefaults, CallMeta } from "./config";
