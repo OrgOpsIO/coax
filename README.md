@@ -9,8 +9,9 @@ for you.
 
 ```bash
 npm install @orgops/coax zod
-npm install @anthropic-ai/sdk   # and/or: npm install openai
 ```
+
+The Anthropic and OpenAI SDKs ship *inside* coax — nothing else to install.
 
 ## Configure once, use `ai` everywhere
 
@@ -205,8 +206,8 @@ await ai.object({
 
 Small and unopinionated. The only vendor-specific surface is the `Provider` interface (`structured` +
 `text`); everything else — schema handling, aggressive parsing, the repair/retry/fallback loop, prompt
-files — is pure and unit-tested. Zod is a peer dependency; the SDKs are optional peers, imported lazily
-only when used. The high-level `createAI` is the recommended entry point; `createClient` (single provider,
+files — is pure and unit-tested. Zod is a peer dependency (you write the schemas); the provider SDKs ship inside coax and load lazily.
+The high-level `createAI` is the recommended entry point; `createClient` (single provider,
 no config) is available for lower-level use.
 
 ## License
