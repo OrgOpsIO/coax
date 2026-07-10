@@ -48,6 +48,7 @@ function current(): AI {
 export const ai: AI = {
   object: async (call) => current().object(call),
   text: async (call) => current().text(call),
+  judge: async (call) => current().judge(call),
   loop: async (opts) => current().loop(opts),
   // Bind to the configured instance lazily on first call (config may be set after this module loads),
   // and cache the underlying prompt fn so the file is parsed once.

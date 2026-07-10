@@ -1,6 +1,6 @@
-import type { ZodType } from "zod";
+import { z, type ZodType } from "zod";
 import type { AIConfig } from "./config";
-import type { Message, Provider, Usage } from "./types";
+import type { Media, Message, Provider, Usage } from "./types";
 import { createClient, type ObjectResult, type TextResult } from "./client";
 import { createRegistry, retrying } from "./registry";
 import { parsePrompt, renderTemplate, type ParsedPrompt } from "./prompt-file";
@@ -32,11 +32,40 @@ export interface TextCall {
   purpose?: string;
 }
 
+export interface JudgeCall {
+  model?: string;
+  /** The thing to evaluate — a string or any object (JSON-stringified for the judge). */
+  output: unknown;
+  /** Acceptance criteria / rubric. Multiple criteria are numbered for the judge. */
+  criteria: string | string[];
+  /** Scoring scale, inclusive. Default [1, 5]. */
+  scale?: [number, number];
+  /** Minimum score to pass. Default: the scale midpoint, rounded up. */
+  passScore?: number;
+  /** Override the judge's system instruction. */
+  system?: string;
+  /** For multimodal judging — e.g. a screenshot of the rendered artifact (Day 4: judge the artifact, not the code). */
+  media?: Media[];
+  purpose?: string;
+}
+
+export interface Judgement {
+  score: number;
+  pass: boolean;
+  rationale: string;
+}
+
 export interface AI {
   /** Typed, validated, self-repairing structured output. */
   object<T>(call: ObjectCall<T>): Promise<ObjectResult<T>>;
   /** Free-form text. */
   text(call: TextCall): Promise<TextResult>;
+  /**
+   * LLM-as-judge: score an output against a rubric (Day 4). Returns a numeric score, a pass/fail against
+   * the threshold, and a rationale. Use it to verify non-deterministic output that a schema can't catch —
+   * intent satisfaction, quality, tone — including multimodal (judge a rendered screenshot).
+   */
+  judge(call: JudgeCall): Promise<Judgement>;
   /**
    * Agent loop: each turn returns a typed step (usually a discriminated union); your `onStep` handler
    * either finishes or feeds back the next user message. Built-in doom guard + optional token budget.
@@ -108,6 +137,22 @@ export function createAI(config: AIConfig): AI {
         if (!fallback) throw err;
         return await clientFor(fallback, alias, call.purpose, true).text(req);
       }
+    },
+
+    async judge(call: JudgeCall): Promise<Judgement> {
+      const [min, max] = call.scale ?? [1, 5];
+      const passScore = call.passScore ?? Math.ceil((min + max) / 2);
+      const schema = z.object({
+        score: z.number().min(min).max(max).describe(`Score from ${min} (fails the criteria) to ${max} (fully meets them).`),
+        rationale: z.string().describe("One or two sentences: concretely why this score, citing the criteria."),
+      });
+      const criteria = Array.isArray(call.criteria) ? call.criteria.map((c, i) => `${i + 1}. ${c}`).join("\n") : call.criteria;
+      const output = typeof call.output === "string" ? call.output : JSON.stringify(call.output, null, 2);
+      const system = call.system
+        ?? `You are a strict, fair evaluator. Score the OUTPUT against the CRITERIA on a ${min}-${max} scale where ${max} fully meets them and ${min} fails. Judge only against the criteria; be specific in the rationale.`;
+      const messages: Message[] = [{ role: "user", content: `CRITERIA:\n${criteria}\n\nOUTPUT:\n${output}`, ...(call.media ? { media: call.media } : {}) }];
+      const { data } = await api.object({ model: call.model, schema, system, messages, purpose: call.purpose ?? "judge" });
+      return { score: data.score, pass: data.score >= passScore, rationale: data.rationale };
     },
 
     loop<T, R>(opts: LoopOptions<T, R>): Promise<R> {

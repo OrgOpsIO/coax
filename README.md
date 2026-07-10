@@ -169,6 +169,22 @@ const answer = await ai.loop<z.infer<typeof Step>, string>({
 });
 ```
 
+### Evaluation — LLM-as-judge
+
+Schemas catch shape; they can't catch quality. `ai.judge()` scores an output against a rubric — for
+intent satisfaction, tone, correctness, or (multimodally) a rendered screenshot.
+
+```ts
+const { score, pass, rationale } = await ai.judge({
+  model: "smart",
+  output: draft,
+  criteria: ["Answers the question", "Cites a source", "No PII"],
+  scale: [1, 5],        // default
+  passScore: 4,         // default: scale midpoint
+});
+if (!pass) await regenerate(rationale);
+```
+
 ### Prompt caching
 
 ```ts
