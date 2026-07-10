@@ -1,0 +1,62 @@
+{
+  "name": "@orgops/coax",
+  "version": "0.1.0",
+  "description": "Typed, provider-agnostic, self-repairing structured output from LLMs. Pure TypeScript — no native modules, no codegen, no vendor lock-in.",
+  "type": "module",
+  "license": "MIT",
+  "author": "orgops",
+  "keywords": [
+    "llm",
+    "structured-output",
+    "zod",
+    "openai",
+    "anthropic",
+    "json-schema",
+    "typescript",
+    "provider-agnostic"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "zod": "^3.25.0 || ^4.0.0"
+  },
+  "dependencies": {
+    "jsonrepair": "^3.13.1",
+    "zod-to-json-schema": "^3.24.5"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/sdk": {
+      "optional": true
+    },
+    "openai": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.95.0",
+    "openai": "^6.7.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0",
+    "zod": "^3.25.0"
+  }
+}
