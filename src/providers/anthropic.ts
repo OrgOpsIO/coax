@@ -39,6 +39,14 @@ function toContent(m: Message): unknown {
 
 const toMessages = (messages: Message[]) => messages.map((m) => ({ role: m.role, content: toContent(m) }));
 
+// A cached system prompt is sent as a content block carrying cache_control; Anthropic then reuses the
+// prefix across calls that share it (a big saving on a fan-out with a stable system prompt).
+function systemParam(system: string | undefined, cache: boolean | undefined): Record<string, unknown> {
+  if (!system) return {};
+  if (!cache) return { system };
+  return { system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }] };
+}
+
 export function anthropic(opts: AnthropicOptions): Provider {
   let client: AnyClient | undefined = opts.client as AnyClient | undefined;
 
@@ -59,7 +67,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
       const resp = await c.messages.create({
         model: opts.model,
         max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
-        ...(req.system ? { system: req.system } : {}),
+        ...systemParam(req.system, req.cacheSystem),
         tools: [{ name: req.schemaName, description: `Return a ${req.schemaName} object.`, input_schema: req.jsonSchema }],
         tool_choice: { type: "tool", name: req.schemaName },
         messages: toMessages(req.messages),
@@ -74,7 +82,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
       const resp = await c.messages.create({
         model: opts.model,
         max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
-        ...(req.system ? { system: req.system } : {}),
+        ...systemParam(req.system, req.cacheSystem),
         messages: toMessages(req.messages),
       });
       const text = resp.content

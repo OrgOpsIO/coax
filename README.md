@@ -129,8 +129,12 @@ createAI({
 - **Validate → repair** — on a schema miss, coax reprompts with the exact errors (up to `maxRepairs`).
 - **Retries** — transient errors (429/5xx/network) retried with exponential backoff.
 - **Model fallback** — a model alias can name a `fallback`; used automatically when the primary fails.
+- **Prompt caching** — `cache: true` caches the system prompt at the provider (Anthropic `cache_control`;
+  a no-op where caching is automatic). Big savings across a fan-out that shares a stable system prompt.
+- **Agent loops** — `ai.loop()` drives a typed multi-turn loop with a built-in doom guard + token budget.
+- **Token budget** — `createBudget(limit)` caps the total spend of a loop or a fan-out.
 - **Usage** — one `onUsage(usage, meta)` hook across every call, plus summed `usage` on each result.
-- **Agent loops & vision** — discriminated-union steps and image/pdf media are first-class.
+- **Vision** — image/pdf media are first-class.
 
 ```ts
 const { data, usage, repairs } = await ai.object({ schema, prompt, maxRepairs: 3 });
@@ -139,19 +143,37 @@ const { data, usage, repairs } = await ai.object({ schema, prompt, maxRepairs: 3
 
 ### Agent loops
 
+`ai.loop()` runs the multi-turn conversation for you — you just handle each typed step. It appends the
+model's step and your reply automatically, guards against a stuck model (doom guard), and can enforce a
+token budget.
+
 ```ts
+import { createBudget } from "@orgops/coax";
+
 const Step = z.discriminatedUnion("action", [
   z.object({ action: z.literal("search"), query: z.string() }),
   z.object({ action: z.literal("answer"), text: z.string() }),
 ]);
 
-const messages = [{ role: "user" as const, content: task }];
-while (true) {
-  const { data } = await ai.object({ model: "smart", schema: Step, messages });
-  if (data.action === "answer") return data.text;
-  messages.push({ role: "assistant", content: JSON.stringify(data) });
-  messages.push({ role: "user", content: await runSearch(data.query) });
-}
+const answer = await ai.loop<z.infer<typeof Step>, string>({
+  model: "smart",
+  schema: Step,
+  system: "Answer the question, searching when you need to.",
+  messages: [{ role: "user", content: task }],
+  maxTurns: 8,
+  budget: createBudget(100_000),
+  onStep: async (step) => {
+    if (step.action === "answer") return { done: true, value: step.text };
+    return { done: false, reply: await runSearch(step.query) };
+  },
+});
+```
+
+### Prompt caching
+
+```ts
+await ai.object({ model: "fast", schema, system: bigStableSystemPrompt, prompt, cache: true });
+// …the same system prompt across a fan-out is billed once at the cache rate.
 ```
 
 ### Vision

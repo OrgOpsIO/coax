@@ -32,12 +32,17 @@ export interface StructuredRequest {
   /** A stable name for the schema (tool name / json_schema name). */
   schemaName: string;
   maxTokens?: number;
+  /** Ask the provider to cache the (stable) system prompt — big savings across a fan-out of calls that
+   *  share it. Provider-native where supported (Anthropic cache_control); a no-op where caching is
+   *  automatic (OpenAI). */
+  cacheSystem?: boolean;
 }
 
 export interface TextRequest {
   system?: string;
   messages: Message[];
   maxTokens?: number;
+  cacheSystem?: boolean;
 }
 
 export interface ProviderResponse {

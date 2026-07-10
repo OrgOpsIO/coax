@@ -13,6 +13,10 @@ export type { Client, ClientOptions, ObjectRequest, ObjectResult, TextResult } f
 export { createRegistry, retrying } from "./registry";
 export type { ResolvedModel } from "./registry";
 export { withRetry, isTransient } from "./retry";
+export { runLoop, CoaxLoopError } from "./loop";
+export type { LoopOptions, LoopControl } from "./loop";
+export { createBudget } from "./budget";
+export type { Budget } from "./budget";
 
 // Providers.
 export { anthropic } from "./providers/anthropic";

@@ -23,6 +23,8 @@ export interface CallDefaults {
   maxRepairs?: number;
   maxTokens?: number;
   retries?: RetryConfig;
+  /** Cache the system prompt by default (Anthropic cache_control; no-op on OpenAI). */
+  cache?: boolean;
 }
 
 /** Metadata passed to observability hooks for every underlying model call. */

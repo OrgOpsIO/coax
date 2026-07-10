@@ -48,6 +48,7 @@ function current(): AI {
 export const ai: AI = {
   object: async (call) => current().object(call),
   text: async (call) => current().text(call),
+  loop: async (opts) => current().loop(opts),
   // Bind to the configured instance lazily on first call (config may be set after this module loads),
   // and cache the underlying prompt fn so the file is parsed once.
   prompt<T = string>(path: string, opts?: { schema?: ZodType<T>; model?: string }) {

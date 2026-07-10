@@ -4,6 +4,7 @@ import type { Message, Provider, Usage } from "./types";
 import { createClient, type ObjectResult, type TextResult } from "./client";
 import { createRegistry, retrying } from "./registry";
 import { parsePrompt, renderTemplate, type ParsedPrompt } from "./prompt-file";
+import { runLoop, type LoopOptions } from "./loop";
 
 export interface ObjectCall<T> {
   /** Model alias (from config.models) or a literal "provider:model". Falls back to defaults.model. */
@@ -15,6 +16,8 @@ export interface ObjectCall<T> {
   messages?: Message[];
   maxTokens?: number;
   maxRepairs?: number;
+  /** Cache the system prompt (Anthropic cache_control; no-op on OpenAI). */
+  cache?: boolean;
   /** Free-form label for observability (e.g. a role like "extraction"). */
   purpose?: string;
 }
@@ -25,6 +28,7 @@ export interface TextCall {
   prompt?: string;
   messages?: Message[];
   maxTokens?: number;
+  cache?: boolean;
   purpose?: string;
 }
 
@@ -33,6 +37,11 @@ export interface AI {
   object<T>(call: ObjectCall<T>): Promise<ObjectResult<T>>;
   /** Free-form text. */
   text(call: TextCall): Promise<TextResult>;
+  /**
+   * Agent loop: each turn returns a typed step (usually a discriminated union); your `onStep` handler
+   * either finishes or feeds back the next user message. Built-in doom guard + optional token budget.
+   */
+  loop<T, R>(opts: LoopOptions<T, R>): Promise<R>;
   /**
    * Load a `.prompt.md` file and return a callable. Pass `schema` for structured output, else text.
    * The returned function fills the file's `{{ vars }}` and runs the call with the file's config.
@@ -77,6 +86,7 @@ export function createAI(config: AIConfig): AI {
         messages: call.messages,
         maxTokens: call.maxTokens ?? d.maxTokens,
         maxRepairs: call.maxRepairs ?? d.maxRepairs,
+        cache: call.cache ?? d.cache,
       };
       try {
         return await clientFor(primary, alias, call.purpose, false).object(req);
@@ -91,13 +101,17 @@ export function createAI(config: AIConfig): AI {
       if (!modelRef) throw new Error("coax: no model given and no defaults.model configured");
       const { primary, fallback } = registry.resolve(modelRef);
       const alias = aliasOf(call.model);
-      const req = { system: call.system, prompt: call.prompt, messages: call.messages, maxTokens: call.maxTokens ?? d.maxTokens };
+      const req = { system: call.system, prompt: call.prompt, messages: call.messages, maxTokens: call.maxTokens ?? d.maxTokens, cache: call.cache ?? d.cache };
       try {
         return await clientFor(primary, alias, call.purpose, false).text(req);
       } catch (err) {
         if (!fallback) throw err;
         return await clientFor(fallback, alias, call.purpose, true).text(req);
       }
+    },
+
+    loop<T, R>(opts: LoopOptions<T, R>): Promise<R> {
+      return runLoop<T, R>((call) => api.object(call), opts);
     },
 
     prompt<T = string>(path: string, opts?: { schema?: ZodType<T>; model?: string }) {

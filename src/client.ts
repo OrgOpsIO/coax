@@ -33,6 +33,8 @@ export interface ObjectRequest<T> {
   maxTokens?: number;
   /** How many reprompt-on-validation-failure rounds. Default 2. */
   maxRepairs?: number;
+  /** Cache the system prompt at the provider (Anthropic cache_control; no-op on OpenAI). */
+  cache?: boolean;
 }
 
 export interface ObjectResult<T> {
@@ -62,7 +64,7 @@ export interface Client {
   /** Typed, validated, self-repairing structured output. */
   object<T>(req: ObjectRequest<T>): Promise<ObjectResult<T>>;
   /** Free-form text (HTML, prose, reasoning) — no schema. */
-  text(req: { system?: string; prompt?: string; messages?: Message[]; maxTokens?: number }): Promise<TextResult>;
+  text(req: { system?: string; prompt?: string; messages?: Message[]; maxTokens?: number; cache?: boolean }): Promise<TextResult>;
 }
 
 function toMessages(prompt: string | undefined, messages: Message[] | undefined): Message[] {
@@ -88,7 +90,7 @@ export function createClient(opts: ClientOptions): Client {
       let lastError = "";
 
       for (let attempt = 0; attempt <= maxRepairs; attempt++) {
-        const res = await provider.structured({ system: req.system, messages, jsonSchema, schemaName, maxTokens: req.maxTokens });
+        const res = await provider.structured({ system: req.system, messages, jsonSchema, schemaName, maxTokens: req.maxTokens, cacheSystem: req.cache });
         usage = addUsage(usage, res.usage);
         model = res.model;
         await onUsage?.(res.usage, res.model);
@@ -109,7 +111,7 @@ export function createClient(opts: ClientOptions): Client {
     },
 
     async text(req): Promise<TextResult> {
-      const res = await provider.text({ system: req.system, messages: toMessages(req.prompt, req.messages), maxTokens: req.maxTokens });
+      const res = await provider.text({ system: req.system, messages: toMessages(req.prompt, req.messages), maxTokens: req.maxTokens, cacheSystem: req.cache });
       await onUsage?.(res.usage, res.model);
       return { text: res.text, usage: res.usage, model: res.model };
     },
