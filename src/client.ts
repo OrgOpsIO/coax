@@ -81,7 +81,20 @@ export function createClient(opts: ClientOptions): Client {
     async object<T>(req: ObjectRequest<T>): Promise<ObjectResult<T>> {
       const schemaName = req.schemaName ?? "output";
       // Zod 4's native JSON Schema. Drop `$schema` — providers want a bare parameters object.
-      const { $schema: _drop, ...jsonSchema } = z.toJSONSchema(req.schema as never) as Record<string, unknown>;
+      const { $schema: _drop, ...userSchema } = z.toJSONSchema(req.schema as never) as Record<string, unknown>;
+      // Provider tool/json_schema roots MUST be an object (Anthropic input_schema + OpenAI json_schema
+      // both reject a bare union/array/primitive root — "input_schema.type: Field required"). When the
+      // user's schema isn't an object at the root (e.g. z.discriminatedUnion / z.array / z.string), wrap
+      // it under a single `value` property and unwrap the model's output before validation. Transparent:
+      // the caller's schema and result are unchanged.
+      const rootIsObject = userSchema.type === "object";
+      const jsonSchema = rootIsObject
+        ? userSchema
+        : { type: "object", properties: { value: userSchema }, required: ["value"], additionalProperties: false };
+      // Unwrap the envelope. Defensive: if the model returned the bare union anyway (no `value` key),
+      // accept it as-is rather than forcing undefined.
+      const unwrap = (raw: unknown): unknown =>
+        !rootIsObject && raw && typeof raw === "object" && "value" in raw ? (raw as { value: unknown }).value : raw;
       const maxRepairs = req.maxRepairs ?? opts.defaultMaxRepairs ?? 2;
       const messages = toMessages(req.prompt, req.messages);
 
@@ -95,7 +108,7 @@ export function createClient(opts: ClientOptions): Client {
         model = res.model;
         await onUsage?.(res.usage, res.model);
 
-        const parsed = (req.schema as unknown as { safeParse(d: unknown): SafeParseResult<T> }).safeParse(extractJson(res.raw));
+        const parsed = (req.schema as unknown as { safeParse(d: unknown): SafeParseResult<T> }).safeParse(unwrap(extractJson(res.raw)));
         if (parsed.success) return { data: parsed.data, usage, model, repairs: attempt };
 
         lastError = formatIssues(parsed.error);

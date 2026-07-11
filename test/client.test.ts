@@ -79,4 +79,30 @@ describe("createClient().object", () => {
     const { data } = await client.object({ schema: Step, prompt: "..." });
     expect(data).toEqual({ action: "fetch", sections: ["a", "b"] });
   });
+
+  it("wraps a non-object root schema in an object envelope (provider tool roots must be objects)", async () => {
+    const Step = z.discriminatedUnion("action", [
+      z.object({ action: z.literal("fetch"), sections: z.array(z.string()) }),
+      z.object({ action: z.literal("select"), candidate: z.number() }),
+    ]);
+    const provider = mockProvider([{ value: { action: "select", candidate: 2 } }]);
+    const client = createClient({ provider });
+    const { data } = await client.object({ schema: Step, prompt: "..." });
+    // The tool schema handed to the provider is an object with a single `value` property...
+    const sent = provider.calls[0]!.jsonSchema as Record<string, unknown>;
+    expect(sent.type).toBe("object");
+    expect((sent.properties as Record<string, unknown>).value).toBeTruthy();
+    // ...and the envelope is unwrapped before validation.
+    expect(data).toEqual({ action: "select", candidate: 2 });
+  });
+
+  it("leaves an object-root schema unwrapped", async () => {
+    const provider = mockProvider([{ label: "Name", helpText: "Ihr Name." }]);
+    const client = createClient({ provider });
+    await client.object({ schema: Field, prompt: "..." });
+    const sent = provider.calls[0]!.jsonSchema as Record<string, unknown>;
+    expect(sent.type).toBe("object");
+    expect((sent.properties as Record<string, unknown>).label).toBeTruthy();
+    expect((sent.properties as Record<string, unknown>).value).toBeUndefined();
+  });
 });
