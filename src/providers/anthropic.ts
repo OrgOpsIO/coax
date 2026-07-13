@@ -11,9 +11,20 @@ export interface AnthropicOptions {
   baseURL?: string;
 }
 
+type AnthropicResponse = { content: unknown[]; usage?: Record<string, number> };
 type AnyClient = {
-  messages: { create(body: Record<string, unknown>): Promise<{ content: unknown[]; usage?: Record<string, number> }> };
+  messages: {
+    create(body: Record<string, unknown>): Promise<AnthropicResponse>;
+    stream(body: Record<string, unknown>): { finalMessage(): Promise<AnthropicResponse> };
+  };
 };
+
+// The SDK REFUSES non-streaming requests whose max_tokens imply a >10-minute response ("Streaming is
+// required for operations that may take longer than 10 minutes"), which large structured outputs hit.
+// Stream under the hood and return the accumulated final message — identical result, no ceiling.
+async function createMessage(c: AnyClient, body: Record<string, unknown>): Promise<AnthropicResponse> {
+  return c.messages.stream(body).finalMessage();
+}
 
 function mapUsage(u: Record<string, number> | undefined): Usage {
   return {
@@ -64,7 +75,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
 
     async structured(req: StructuredRequest): Promise<ProviderResponse> {
       const c = await getClient();
-      const resp = await c.messages.create({
+      const resp = await createMessage(c, {
         model: opts.model,
         max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
         ...systemParam(req.system, req.cacheSystem),
@@ -79,7 +90,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
 
     async text(req: TextRequest): Promise<ProviderResponse> {
       const c = await getClient();
-      const resp = await c.messages.create({
+      const resp = await createMessage(c, {
         model: opts.model,
         max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
         ...systemParam(req.system, req.cacheSystem),
