@@ -1,6 +1,19 @@
-import { z, type ZodType } from "zod";
+import type { ZodType } from "zod";
 import { extractJson } from "./parse";
-import { addUsage, emptyUsage, type Message, type Provider, type Usage } from "./types";
+import { formatIssues, safeParse, toProviderSchema } from "./schema";
+import {
+  addUsage,
+  emptyUsage,
+  type Message,
+  type Provider,
+  type SpeakRequest,
+  type SpeakResponse,
+  type ToolsRequest,
+  type ToolsResponse,
+  type TranscribeRequest,
+  type TranscribeResponse,
+  type Usage,
+} from "./types";
 
 export class CoaxSchemaError extends Error {
   constructor(message: string, readonly lastError: string, readonly attempts: number) {
@@ -9,16 +22,12 @@ export class CoaxSchemaError extends Error {
   }
 }
 
-/** Minimal Zod surface coax relies on — kept loose so both Zod 3 and Zod 4 satisfy it. */
-type SafeParseResult<T> =
-  | { success: true; data: T }
-  | { success: false; error: { issues?: { path: (string | number)[]; message: string }[]; message?: string } };
-
-function formatIssues(error: { issues?: { path: (string | number)[]; message: string }[]; message?: string }): string {
-  if (!error.issues?.length) return error.message ?? "output did not match the schema";
-  return error.issues
-    .map((i) => `- ${i.path.length ? i.path.join(".") : "(root)"}: ${i.message}`)
-    .join("\n");
+/** Raised when a call needs a capability the configured endpoint does not implement. */
+export class CoaxUnsupportedError extends Error {
+  constructor(readonly capability: string, readonly provider: string) {
+    super(`coax: provider "${provider}" does not support ${capability}. Point this call at a model whose endpoint serves it.`);
+    this.name = "CoaxUnsupportedError";
+  }
 }
 
 export interface ObjectRequest<T> {
@@ -34,6 +43,8 @@ export interface ObjectRequest<T> {
   maxRepairs?: number;
   /** Cache the system prompt at the provider (Anthropic cache_control; no-op on OpenAI). */
   cache?: boolean;
+  /** Extra HTTP headers for this call (e.g. forwarding the end user's identity to a gateway). */
+  headers?: Record<string, string>;
 }
 
 export interface ObjectResult<T> {
@@ -51,6 +62,19 @@ export interface TextResult {
   model: string;
 }
 
+export interface TranscribeResult {
+  text: string;
+  usage: Usage;
+  model: string;
+}
+
+export interface SpeakResult {
+  audio: Uint8Array;
+  mediaType: string;
+  usage: Usage;
+  model: string;
+}
+
 export interface ClientOptions {
   provider: Provider;
   defaultMaxRepairs?: number;
@@ -63,7 +87,13 @@ export interface Client {
   /** Typed, validated, self-repairing structured output. */
   object<T>(req: ObjectRequest<T>): Promise<ObjectResult<T>>;
   /** Free-form text (HTML, prose, reasoning) — no schema. */
-  text(req: { system?: string; prompt?: string; messages?: Message[]; maxTokens?: number; cache?: boolean }): Promise<TextResult>;
+  text(req: { system?: string; prompt?: string; messages?: Message[]; maxTokens?: number; cache?: boolean; headers?: Record<string, string> }): Promise<TextResult>;
+  /** One native tool-calling turn. `ai.run()` drives the loop over this. */
+  tools(req: ToolsRequest): Promise<ToolsResponse>;
+  /** Speech-to-text. Throws CoaxUnsupportedError where the endpoint has no transcription. */
+  transcribe(req: TranscribeRequest): Promise<TranscribeResult>;
+  /** Text-to-speech. Throws CoaxUnsupportedError where the endpoint has no speech synthesis. */
+  speak(req: SpeakRequest): Promise<SpeakResult>;
 }
 
 function toMessages(prompt: string | undefined, messages: Message[] | undefined): Message[] {
@@ -75,26 +105,19 @@ function toMessages(prompt: string | undefined, messages: Message[] | undefined)
 export function createClient(opts: ClientOptions): Client {
   const { provider, onUsage } = opts;
 
+  /** Resolve an optional provider capability, or fail with a message that names the missing piece. */
+  function capability<K extends "tools" | "transcribe" | "speak">(key: K, label: string): NonNullable<Provider[K]> {
+    const fn = provider[key];
+    if (!fn) throw new CoaxUnsupportedError(label, provider.name);
+    return fn.bind(provider) as NonNullable<Provider[K]>;
+  }
+
   return {
     provider,
 
     async object<T>(req: ObjectRequest<T>): Promise<ObjectResult<T>> {
       const schemaName = req.schemaName ?? "output";
-      // Zod 4's native JSON Schema. Drop `$schema` — providers want a bare parameters object.
-      const { $schema: _drop, ...userSchema } = z.toJSONSchema(req.schema as never) as Record<string, unknown>;
-      // Provider tool/json_schema roots MUST be an object (Anthropic input_schema + OpenAI json_schema
-      // both reject a bare union/array/primitive root — "input_schema.type: Field required"). When the
-      // user's schema isn't an object at the root (e.g. z.discriminatedUnion / z.array / z.string), wrap
-      // it under a single `value` property and unwrap the model's output before validation. Transparent:
-      // the caller's schema and result are unchanged.
-      const rootIsObject = userSchema.type === "object";
-      const jsonSchema = rootIsObject
-        ? userSchema
-        : { type: "object", properties: { value: userSchema }, required: ["value"], additionalProperties: false };
-      // Unwrap the envelope. Defensive: if the model returned the bare union anyway (no `value` key),
-      // accept it as-is rather than forcing undefined.
-      const unwrap = (raw: unknown): unknown =>
-        !rootIsObject && raw && typeof raw === "object" && "value" in raw ? (raw as { value: unknown }).value : raw;
+      const { jsonSchema, unwrap } = toProviderSchema(req.schema);
       const maxRepairs = req.maxRepairs ?? opts.defaultMaxRepairs ?? 2;
       const messages = toMessages(req.prompt, req.messages);
 
@@ -103,12 +126,20 @@ export function createClient(opts: ClientOptions): Client {
       let lastError = "";
 
       for (let attempt = 0; attempt <= maxRepairs; attempt++) {
-        const res = await provider.structured({ system: req.system, messages, jsonSchema, schemaName, maxTokens: req.maxTokens, cacheSystem: req.cache });
+        const res = await provider.structured({
+          system: req.system,
+          messages,
+          jsonSchema,
+          schemaName,
+          maxTokens: req.maxTokens,
+          cacheSystem: req.cache,
+          headers: req.headers,
+        });
         usage = addUsage(usage, res.usage);
         model = res.model;
         await onUsage?.(res.usage, res.model);
 
-        const parsed = (req.schema as unknown as { safeParse(d: unknown): SafeParseResult<T> }).safeParse(unwrap(extractJson(res.raw)));
+        const parsed = safeParse(req.schema, unwrap(extractJson(res.raw)));
         if (parsed.success) return { data: parsed.data, usage, model, repairs: attempt };
 
         lastError = formatIssues(parsed.error);
@@ -124,9 +155,33 @@ export function createClient(opts: ClientOptions): Client {
     },
 
     async text(req): Promise<TextResult> {
-      const res = await provider.text({ system: req.system, messages: toMessages(req.prompt, req.messages), maxTokens: req.maxTokens, cacheSystem: req.cache });
+      const res = await provider.text({
+        system: req.system,
+        messages: toMessages(req.prompt, req.messages),
+        maxTokens: req.maxTokens,
+        cacheSystem: req.cache,
+        headers: req.headers,
+      });
       await onUsage?.(res.usage, res.model);
       return { text: res.text, usage: res.usage, model: res.model };
+    },
+
+    async tools(req: ToolsRequest): Promise<ToolsResponse> {
+      const res = await capability("tools", "tool calling")(req);
+      await onUsage?.(res.usage, res.model);
+      return res;
+    },
+
+    async transcribe(req: TranscribeRequest): Promise<TranscribeResult> {
+      const res: TranscribeResponse = await capability("transcribe", "transcription")(req);
+      await onUsage?.(res.usage, res.model);
+      return { text: res.text, usage: res.usage, model: res.model };
+    },
+
+    async speak(req: SpeakRequest): Promise<SpeakResult> {
+      const res: SpeakResponse = await capability("speak", "speech synthesis")(req);
+      await onUsage?.(res.usage, res.model);
+      return { audio: res.audio, mediaType: res.mediaType, usage: res.usage, model: res.model };
     },
   };
 }

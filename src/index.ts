@@ -2,14 +2,18 @@
 export { configure, ai, isConfigured, reset } from "./runtime";
 // Explicit instance (recommended for libraries, tests, multiple configs).
 export { createAI } from "./ai";
-export type { AI, ObjectCall, TextCall, JudgeCall, Judgement } from "./ai";
-export type { AIConfig, ProviderConfig, ModelConfig, RetryConfig, CallDefaults, CallMeta } from "./config";
+export type { AI, ObjectCall, TextCall, JudgeCall, Judgement, RunCall, TranscribeCall, SpeakCall } from "./ai";
+export type { AIConfig, ProviderConfig, ProviderEndpoint, ModelConfig, RetryConfig, CallDefaults, CallMeta } from "./config";
 export { parsePrompt, renderTemplate } from "./prompt-file";
 export type { ParsedPrompt, PromptMeta } from "./prompt-file";
 
+// Tools — definitions the model may call, and the driver behind ai.run().
+export { tool, runTools, CoaxToolError } from "./tools";
+export type { Tool, ToolContext, ToolInvocation, RunOptions, RunResult } from "./tools";
+
 // Low-level primitives (single provider, no config layer).
-export { createClient, CoaxSchemaError } from "./client";
-export type { Client, ClientOptions, ObjectRequest, ObjectResult, TextResult } from "./client";
+export { createClient, CoaxSchemaError, CoaxUnsupportedError } from "./client";
+export type { Client, ClientOptions, ObjectRequest, ObjectResult, TextResult, TranscribeResult, SpeakResult } from "./client";
 export { createRegistry, retrying } from "./registry";
 export type { ResolvedModel } from "./registry";
 export { withRetry, isTransient } from "./retry";
@@ -18,7 +22,7 @@ export type { LoopOptions, LoopControl } from "./loop";
 export { createBudget } from "./budget";
 export type { Budget } from "./budget";
 
-// Providers.
+// Providers. Both double as adapters for any endpoint speaking their wire protocol.
 export { anthropic } from "./providers/anthropic";
 export type { AnthropicOptions } from "./providers/anthropic";
 export { openai } from "./providers/openai";
@@ -26,5 +30,25 @@ export type { OpenAiOptions } from "./providers/openai";
 
 // Building blocks / types.
 export { extractJson } from "./parse";
+export { toProviderSchema, formatIssues, safeParse } from "./schema";
 export { addUsage, emptyUsage } from "./types";
-export type { Media, Message, Provider, ProviderResponse, StructuredRequest, TextRequest, Usage } from "./types";
+export type {
+  AudioFormat,
+  AudioInput,
+  Media,
+  Message,
+  Provider,
+  ProviderResponse,
+  SpeakRequest,
+  SpeakResponse,
+  StructuredRequest,
+  TextRequest,
+  ToolCall,
+  ToolDefinition,
+  ToolResult,
+  ToolsRequest,
+  ToolsResponse,
+  TranscribeRequest,
+  TranscribeResponse,
+  Usage,
+} from "./types";

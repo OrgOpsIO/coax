@@ -1,10 +1,11 @@
 import { z, type ZodType } from "zod";
 import type { AIConfig } from "./config";
-import type { Media, Message, Provider, Usage } from "./types";
-import { createClient, type ObjectResult, type TextResult } from "./client";
+import type { AudioFormat, AudioInput, Media, Message, Provider, Usage } from "./types";
+import { createClient, type ObjectResult, type SpeakResult, type TextResult, type TranscribeResult } from "./client";
 import { createRegistry, retrying } from "./registry";
 import { parsePrompt, renderTemplate, type ParsedPrompt } from "./prompt-file";
 import { runLoop, type LoopOptions } from "./loop";
+import { runTools, type RunOptions, type RunResult, type Tool } from "./tools";
 
 export interface ObjectCall<T> {
   /** Model alias (from config.models) or a literal "provider:model". Falls back to defaults.model. */
@@ -18,6 +19,8 @@ export interface ObjectCall<T> {
   maxRepairs?: number;
   /** Cache the system prompt (Anthropic cache_control; no-op on OpenAI). */
   cache?: boolean;
+  /** Extra HTTP headers — e.g. forwarding the end user's token so the gateway authorizes per user. */
+  headers?: Record<string, string>;
   /** Free-form label for observability (e.g. a role like "extraction"). */
   purpose?: string;
 }
@@ -29,6 +32,7 @@ export interface TextCall {
   messages?: Message[];
   maxTokens?: number;
   cache?: boolean;
+  headers?: Record<string, string>;
   purpose?: string;
 }
 
@@ -44,8 +48,9 @@ export interface JudgeCall {
   passScore?: number;
   /** Override the judge's system instruction. */
   system?: string;
-  /** For multimodal judging — e.g. a screenshot of the rendered artifact (Day 4: judge the artifact, not the code). */
+  /** For multimodal judging — e.g. a screenshot of the rendered artifact. */
   media?: Media[];
+  headers?: Record<string, string>;
   purpose?: string;
 }
 
@@ -55,22 +60,69 @@ export interface Judgement {
   rationale: string;
 }
 
+export interface TranscribeCall {
+  model?: string;
+  /** The audio bytes. A browser upload's Blob/File works directly. */
+  audio: AudioInput;
+  /** ISO-639-1 hint, e.g. "de". */
+  language?: string;
+  /** Context hint — domain vocabulary, names, expected spelling. */
+  prompt?: string;
+  headers?: Record<string, string>;
+  purpose?: string;
+}
+
+export interface SpeakCall {
+  model?: string;
+  input: string;
+  voice?: string;
+  format?: AudioFormat;
+  speed?: number;
+  instructions?: string;
+  headers?: Record<string, string>;
+  purpose?: string;
+}
+
+export interface RunCall<C = unknown> extends Omit<RunOptions<C>, "tools"> {
+  model?: string;
+  system?: string;
+  prompt?: string;
+  messages?: Message[];
+  tools: Tool<any, C>[];
+  maxTokens?: number;
+  cache?: boolean;
+  headers?: Record<string, string>;
+  purpose?: string;
+}
+
 export interface AI {
   /** Typed, validated, self-repairing structured output. */
   object<T>(call: ObjectCall<T>): Promise<ObjectResult<T>>;
   /** Free-form text. */
   text(call: TextCall): Promise<TextResult>;
   /**
-   * LLM-as-judge: score an output against a rubric (Day 4). Returns a numeric score, a pass/fail against
-   * the threshold, and a rationale. Use it to verify non-deterministic output that a schema can't catch —
+   * LLM-as-judge: score an output against a rubric. Returns a numeric score, a pass/fail against the
+   * threshold, and a rationale. Use it to verify non-deterministic output that a schema can't catch —
    * intent satisfaction, quality, tone — including multimodal (judge a rendered screenshot).
    */
   judge(call: JudgeCall): Promise<Judgement>;
   /**
+   * Tool-calling run: hand the model a set of tools and let it work until it answers. coax validates
+   * every tool's arguments against its Zod schema, runs your handler, feeds the result back, and
+   * returns the final text plus the full transcript.
+   */
+  run<C = unknown>(call: RunCall<C>): Promise<RunResult>;
+  /**
    * Agent loop: each turn returns a typed step (usually a discriminated union); your `onStep` handler
    * either finishes or feeds back the next user message. Built-in doom guard + optional token budget.
+   * Prefer `run()` when the model should choose from a set of actions; use `loop()` when YOU own the
+   * control flow between turns.
    */
   loop<T, R>(opts: LoopOptions<T, R>): Promise<R>;
+  /** Speech-to-text against an endpoint that serves it. */
+  transcribe(call: TranscribeCall): Promise<TranscribeResult>;
+  /** Text-to-speech against an endpoint that serves it. */
+  speak(call: SpeakCall): Promise<SpeakResult>;
   /**
    * Load a `.prompt.md` file and return a callable. Pass `schema` for structured output, else text.
    * The returned function fills the file's `{{ vars }}` and runs the call with the file's config.
@@ -101,42 +153,56 @@ export function createAI(config: AIConfig): AI {
     return modelRef && config.models?.[modelRef] ? modelRef : undefined;
   }
 
+  /**
+   * Resolve the model, run `call` against the primary, and fall back to the alias' fallback model on
+   * ANY failure. Shared by every capability so fallback behaves identically across them.
+   */
+  async function withFallback<R>(
+    modelRef: string | undefined,
+    requested: string | undefined,
+    purpose: string | undefined,
+    call: (client: ReturnType<typeof clientFor>) => Promise<R>,
+  ): Promise<R> {
+    const ref = modelRef ?? d.model;
+    if (!ref) throw new Error("coax: no model given and no defaults.model configured");
+    const { primary, fallback } = registry.resolve(ref);
+    const alias = aliasOf(requested);
+    try {
+      return await call(clientFor(primary, alias, purpose, false));
+    } catch (err) {
+      if (!fallback) throw err;
+      return await call(clientFor(fallback, alias, purpose, true));
+    }
+  }
+
   const api: AI = {
-    async object<T>(call: ObjectCall<T>): Promise<ObjectResult<T>> {
-      const modelRef = call.model ?? d.model;
-      if (!modelRef) throw new Error("coax: no model given and no defaults.model configured");
-      const { primary, fallback } = registry.resolve(modelRef);
-      const alias = aliasOf(call.model);
-      const req = {
-        schema: call.schema,
-        schemaName: call.schemaName,
-        system: call.system,
-        prompt: call.prompt,
-        messages: call.messages,
-        maxTokens: call.maxTokens ?? d.maxTokens,
-        maxRepairs: call.maxRepairs ?? d.maxRepairs,
-        cache: call.cache ?? d.cache,
-      };
-      try {
-        return await clientFor(primary, alias, call.purpose, false).object(req);
-      } catch (err) {
-        if (!fallback) throw err;
-        return await clientFor(fallback, alias, call.purpose, true).object(req);
-      }
+    object<T>(call: ObjectCall<T>): Promise<ObjectResult<T>> {
+      return withFallback(call.model, call.model, call.purpose, (client) =>
+        client.object({
+          schema: call.schema,
+          schemaName: call.schemaName,
+          system: call.system,
+          prompt: call.prompt,
+          messages: call.messages,
+          maxTokens: call.maxTokens ?? d.maxTokens,
+          maxRepairs: call.maxRepairs ?? d.maxRepairs,
+          cache: call.cache ?? d.cache,
+          headers: call.headers,
+        }),
+      );
     },
 
-    async text(call: TextCall): Promise<TextResult> {
-      const modelRef = call.model ?? d.model;
-      if (!modelRef) throw new Error("coax: no model given and no defaults.model configured");
-      const { primary, fallback } = registry.resolve(modelRef);
-      const alias = aliasOf(call.model);
-      const req = { system: call.system, prompt: call.prompt, messages: call.messages, maxTokens: call.maxTokens ?? d.maxTokens, cache: call.cache ?? d.cache };
-      try {
-        return await clientFor(primary, alias, call.purpose, false).text(req);
-      } catch (err) {
-        if (!fallback) throw err;
-        return await clientFor(fallback, alias, call.purpose, true).text(req);
-      }
+    text(call: TextCall): Promise<TextResult> {
+      return withFallback(call.model, call.model, call.purpose, (client) =>
+        client.text({
+          system: call.system,
+          prompt: call.prompt,
+          messages: call.messages,
+          maxTokens: call.maxTokens ?? d.maxTokens,
+          cache: call.cache ?? d.cache,
+          headers: call.headers,
+        }),
+      );
     },
 
     async judge(call: JudgeCall): Promise<Judgement> {
@@ -151,12 +217,58 @@ export function createAI(config: AIConfig): AI {
       const system = call.system
         ?? `You are a strict, fair evaluator. Score the OUTPUT against the CRITERIA on a ${min}-${max} scale where ${max} fully meets them and ${min} fails. Judge only against the criteria; be specific in the rationale.`;
       const messages: Message[] = [{ role: "user", content: `CRITERIA:\n${criteria}\n\nOUTPUT:\n${output}`, ...(call.media ? { media: call.media } : {}) }];
-      const { data } = await api.object({ model: call.model, schema, system, messages, purpose: call.purpose ?? "judge" });
+      const { data } = await api.object({ model: call.model, schema, system, messages, headers: call.headers, purpose: call.purpose ?? "judge" });
       return { score: data.score, pass: data.score >= passScore, rationale: data.rationale };
+    },
+
+    // `async` so a bad call rejects rather than throwing synchronously — same contract as every other method.
+    async run<C = unknown>(call: RunCall<C>): Promise<RunResult> {
+      const messages = call.messages?.length ? call.messages : call.prompt != null ? [{ role: "user" as const, content: call.prompt }] : undefined;
+      if (!messages) throw new Error("coax: provide either `prompt` or `messages`");
+      return withFallback(call.model, call.model, call.purpose, (client) =>
+        runTools<C>(
+          (req) =>
+            client.tools({
+              system: call.system,
+              messages: req.messages,
+              tools: req.tools,
+              maxTokens: call.maxTokens ?? d.maxTokens,
+              cacheSystem: call.cache ?? d.cache,
+              headers: call.headers,
+            }),
+          {
+            messages,
+            tools: call.tools,
+            context: call.context,
+            maxSteps: call.maxSteps ?? d.maxSteps,
+            budget: call.budget,
+            onToolCall: call.onToolCall,
+          },
+        ),
+      );
     },
 
     loop<T, R>(opts: LoopOptions<T, R>): Promise<R> {
       return runLoop<T, R>((call) => api.object(call), opts);
+    },
+
+    transcribe(call: TranscribeCall): Promise<TranscribeResult> {
+      return withFallback(call.model, call.model, call.purpose ?? "transcribe", (client) =>
+        client.transcribe({ audio: call.audio, language: call.language, prompt: call.prompt, headers: call.headers }),
+      );
+    },
+
+    speak(call: SpeakCall): Promise<SpeakResult> {
+      return withFallback(call.model, call.model, call.purpose ?? "speak", (client) =>
+        client.speak({
+          input: call.input,
+          voice: call.voice,
+          format: call.format,
+          speed: call.speed,
+          instructions: call.instructions,
+          headers: call.headers,
+        }),
+      );
     },
 
     prompt<T = string>(path: string, opts?: { schema?: ZodType<T>; model?: string }) {

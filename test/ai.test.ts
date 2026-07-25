@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { createAI } from "../src/ai";
+import { tool } from "../src/tools";
 import { parsePrompt, renderTemplate } from "../src/prompt-file";
 import { emptyUsage, type Provider } from "../src/types";
 
@@ -79,6 +80,60 @@ describe("createAI", () => {
     const ai = createAI({ providers: { mock: factory }, models: { a: "mock:m" }, defaults: { retries: { attempts: 3, initialDelayMs: 1 } } });
     const { data } = await ai.object({ model: "a", schema: Out, prompt: "?" });
     expect(data.answer).toBe("ok");
+  });
+});
+
+describe("createAI().run", () => {
+  // The backend-for-frontend shape: the model asks for data, the tool fetches it with credentials the
+  // model never sees, and the caller's identity rides along on the request headers.
+  it("drives a tool-calling run and forwards identity headers to the endpoint", async () => {
+    const turns = [
+      { text: "", calls: [{ id: "c1", name: "open_invoices", input: { clientId: "123" } }] },
+      { text: "Sie haben eine offene Rechnung über 42,50 €.", calls: [] },
+    ];
+    const headersSeen: (Record<string, string> | undefined)[] = [];
+    let turn = 0;
+    const provider: Provider = {
+      name: "mock",
+      model: "chat/Qwen3-VL-32B",
+      structured: async () => ({ raw: {}, text: "{}", usage: emptyUsage(), model: "chat/Qwen3-VL-32B" }),
+      text: async () => ({ raw: "", text: "", usage: emptyUsage(), model: "chat/Qwen3-VL-32B" }),
+      async tools(req) {
+        headersSeen.push(req.headers);
+        return { ...turns[turn++]!, usage: { ...emptyUsage(), inputTokens: 9 }, model: "chat/Qwen3-VL-32B" };
+      },
+    };
+
+    const openInvoices = tool<{ clientId: string }, { token: string }>({
+      name: "open_invoices",
+      description: "List a client's open invoices.",
+      input: z.object({ clientId: z.string() }),
+      run: ({ clientId }, ctx) => [{ id: "R-1", total: 42.5, requestedBy: clientId, auth: ctx.context.token }],
+    });
+
+    const ai = createAI({ providers: { orgops: () => provider }, models: { local: "orgops:chat/Qwen3-VL-32B" } });
+    const result = await ai.run({
+      model: "local",
+      system: "Du bist der Assistent im Kundenportal.",
+      prompt: "Habe ich offene Rechnungen?",
+      tools: [openInvoices],
+      context: { token: "server-side-secret" },
+      headers: { Authorization: "Bearer end-user-token" },
+    });
+
+    expect(result.text).toContain("42,50");
+    expect(result.calls).toHaveLength(1);
+    expect(result.usage.inputTokens).toBe(18); // two turns × 9
+    // The end user's token reached the gateway on every turn — so a policy engine behind it can decide.
+    expect(headersSeen).toEqual([{ Authorization: "Bearer end-user-token" }, { Authorization: "Bearer end-user-token" }]);
+  });
+
+  it("reports a provider that cannot do tool calling", async () => {
+    const { factory } = scripted({ m: [] });
+    const ai = createAI({ providers: { mock: factory }, models: { a: "mock:m" } });
+    await expect(
+      ai.run({ model: "a", prompt: "?", tools: [tool({ name: "x", description: "x", input: z.object({}), run: () => 1 })] }),
+    ).rejects.toThrow(/does not support tool calling/);
   });
 });
 
