@@ -1,6 +1,7 @@
 import type { ZodType } from "zod";
 import { addUsage, emptyUsage, type Message, type ToolCall, type ToolResult, type ToolsRequest, type ToolsResponse, type Usage } from "./types";
 import { formatIssues, safeParse, toProviderSchema } from "./schema";
+import { CoaxAbortError } from "./client";
 import type { Budget } from "./budget";
 
 /**
@@ -51,6 +52,8 @@ export interface RunOptions<C = unknown> {
   maxSteps?: number;
   /** Optional token budget — the run stops before a turn once it is exhausted. */
   budget?: Budget;
+  /** Cancel the run — the in-flight model call aborts, and no further turn starts. */
+  signal?: AbortSignal;
   /** Fired after each tool runs — for logging, tracing, or streaming progress to a UI. */
   onToolCall?: (invocation: ToolInvocation) => void | Promise<void>;
 }
@@ -68,10 +71,26 @@ export interface RunResult {
   model: string;
 }
 
+/**
+ * A tool run that died at a limit (maxSteps, budget) still cost tokens and produced a transcript —
+ * both ride on the error so a failed run can be booked and debugged, not just mourned.
+ */
 export class CoaxToolError extends Error {
-  constructor(message: string) {
+  /** Usage summed across the turns that completed before the failure. */
+  readonly usage: Usage;
+  /** The transcript up to the failure — replayable, and gold for debugging a dead agent run. */
+  readonly messages: Message[];
+  /** Every tool that ran before the failure, in order. */
+  readonly calls: ToolInvocation[];
+  /** Model turns completed. */
+  readonly steps: number;
+  constructor(message: string, state?: { usage?: Usage; messages?: Message[]; calls?: ToolInvocation[]; steps?: number }) {
     super(message);
     this.name = "CoaxToolError";
+    this.usage = state?.usage ?? emptyUsage();
+    this.messages = state?.messages ?? [];
+    this.calls = state?.calls ?? [];
+    this.steps = state?.steps ?? 0;
   }
 }
 
@@ -103,9 +122,16 @@ export async function runTools<C = unknown>(
   const calls: ToolInvocation[] = [];
 
   for (let step = 0; step < maxSteps; step++) {
-    if (opts.budget?.over()) throw new CoaxToolError(`coax: token budget exhausted after ${step} step(s)`);
+    if (opts.signal?.aborted) throw new CoaxAbortError(usage);
+    if (opts.budget?.over()) throw new CoaxToolError(`coax: token budget exhausted after ${step} step(s)`, { usage, messages, calls, steps: step });
 
-    const res = await callTools({ messages, tools: definitions });
+    let res: ToolsResponse;
+    try {
+      res = await callTools({ messages, tools: definitions });
+    } catch (err) {
+      // An abort mid-call carries only that call's (empty) usage — add what this run spent before it.
+      throw err instanceof CoaxAbortError ? new CoaxAbortError(addUsage(usage, err.usage), err) : err;
+    }
     usage = addUsage(usage, res.usage);
     model = res.model;
     opts.budget?.record(res.usage);
@@ -154,5 +180,5 @@ export async function runTools<C = unknown>(
     messages.push({ role: "user", content: "", toolResults: results });
   }
 
-  throw new CoaxToolError(`coax: the model was still calling tools after ${maxSteps} steps`);
+  throw new CoaxToolError(`coax: the model was still calling tools after ${maxSteps} steps`, { usage, messages, calls, steps: maxSteps });
 }

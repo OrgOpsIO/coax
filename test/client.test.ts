@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { createClient, CoaxSchemaError } from "../src/client";
+import { createClient, CoaxAbortError, CoaxSchemaError } from "../src/client";
 import { emptyUsage, type Provider, type ProviderResponse, type StructuredRequest, type TextRequest } from "../src/types";
 
 // A scripted provider: returns queued raw outputs in order, recording the requests it saw.
@@ -104,5 +104,45 @@ describe("createClient().object", () => {
     expect(sent.type).toBe("object");
     expect((sent.properties as Record<string, unknown>).label).toBeTruthy();
     expect((sent.properties as Record<string, unknown>).value).toBeUndefined();
+  });
+});
+
+describe("createClient().object — failure accounting & abort", () => {
+  it("CoaxSchemaError carries the usage the failed attempts cost", async () => {
+    const provider = mockProvider([{ bad: 1 }, { bad: 2 }, { bad: 3 }]);
+    const client = createClient({ provider });
+    const err: CoaxSchemaError = await client.object({ schema: Field, prompt: "...", maxRepairs: 2 }).catch((e) => e);
+    expect(err).toBeInstanceOf(CoaxSchemaError);
+    expect(err.usage.inputTokens).toBe(30); // three attempts × 10
+    expect(err.usage.outputTokens).toBe(15);
+  });
+
+  it("an already-aborted signal fails fast with CoaxAbortError, without calling the provider", async () => {
+    const provider = mockProvider([{ label: "x", helpText: "y" }]);
+    const client = createClient({ provider });
+    const ac = new AbortController();
+    ac.abort();
+    await expect(client.object({ schema: Field, prompt: "...", signal: ac.signal })).rejects.toBeInstanceOf(CoaxAbortError);
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("normalizes an SDK abort mid-repair to CoaxAbortError carrying the usage spent so far", async () => {
+    const ac = new AbortController();
+    const inner = mockProvider([{ label: "x", helpText: "" }]); // first attempt: invalid → repair round
+    const provider: typeof inner = {
+      ...inner,
+      async structured(req) {
+        if (inner.calls.length === 1) {
+          // Second attempt: the user hangs up; the SDK throws its own abort error.
+          ac.abort();
+          throw Object.assign(new Error("Request was aborted."), { name: "APIUserAbortError" });
+        }
+        return inner.structured(req);
+      },
+    };
+    const client = createClient({ provider });
+    const err: CoaxAbortError = await client.object({ schema: Field, prompt: "...", signal: ac.signal }).catch((e) => e);
+    expect(err).toBeInstanceOf(CoaxAbortError);
+    expect(err.usage.inputTokens).toBe(10); // the completed first attempt is still booked
   });
 });

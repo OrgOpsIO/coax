@@ -39,7 +39,7 @@ export interface OpenAiOptions {
 
 type ChatMessage = { content?: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[] };
 type ChatResponse = { choices: { message?: ChatMessage }[]; usage?: Record<string, unknown> };
-type RequestOptions = { headers?: Record<string, string> };
+type RequestOptions = { headers?: Record<string, string>; signal?: AbortSignal };
 type AnyClient = {
   chat: { completions: { create(body: Record<string, unknown>, options?: RequestOptions): Promise<ChatResponse> } };
   audio: {
@@ -141,9 +141,14 @@ export function openai(opts: OpenAiOptions): Provider {
     return client;
   }
 
-  const requestOptions = (headers: Record<string, string> | undefined): RequestOptions | undefined => {
+  const requestOptions = (headers: Record<string, string> | undefined, signal: AbortSignal | undefined): RequestOptions | undefined => {
     const merged = { ...opts.headers, ...headers };
-    return Object.keys(merged).length ? { headers: merged } : undefined;
+    const out: RequestOptions = {
+      ...(Object.keys(merged).length ? { headers: merged } : {}),
+      // The SDK aborts the underlying HTTP request — the endpoint sees the disconnect.
+      ...(signal ? { signal } : {}),
+    };
+    return Object.keys(out).length ? out : undefined;
   };
 
   return {
@@ -160,7 +165,7 @@ export function openai(opts: OpenAiOptions): Provider {
           tools: [{ type: "function", function: { name: req.schemaName, description: `Return a ${req.schemaName} object.`, parameters: req.jsonSchema } }],
           tool_choice: { type: "function", function: { name: req.schemaName } },
         },
-        requestOptions(req.headers),
+        requestOptions(req.headers, req.signal),
       );
       const args = resp.choices[0]?.message?.tool_calls?.[0]?.function?.arguments ?? "";
       return { raw: args, text: args, usage: mapUsage(resp.usage), model: opts.model };
@@ -174,7 +179,7 @@ export function openai(opts: OpenAiOptions): Provider {
           max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
           messages: toMessages(req.system, req.messages),
         },
-        requestOptions(req.headers),
+        requestOptions(req.headers, req.signal),
       );
       const text = resp.choices[0]?.message?.content ?? "";
       return { raw: text, text, usage: mapUsage(resp.usage), model: opts.model };
@@ -190,7 +195,7 @@ export function openai(opts: OpenAiOptions): Provider {
           tools: req.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.jsonSchema } })),
           tool_choice: "auto",
         },
-        requestOptions(req.headers),
+        requestOptions(req.headers, req.signal),
       );
       const message = resp.choices[0]?.message;
       const calls: ToolCall[] = (message?.tool_calls ?? []).map((tc) => ({
@@ -210,7 +215,7 @@ export function openai(opts: OpenAiOptions): Provider {
       const file = await toFile(req.audio.data as never, filename, { type: mediaType });
       const resp = await c.audio.transcriptions.create(
         { file, model, ...(req.language ? { language: req.language } : {}), ...(req.prompt ? { prompt: req.prompt } : {}) },
-        requestOptions(req.headers),
+        requestOptions(req.headers, req.signal),
       );
       // Most self-hosted Whisper servers report no usage at all — report zeros rather than guessing.
       return { text: resp.text, usage: mapUsage(resp.usage), model };
@@ -231,7 +236,7 @@ export function openai(opts: OpenAiOptions): Provider {
           ...(req.speed != null ? { speed: req.speed } : {}),
           ...(req.instructions ? { instructions: req.instructions } : {}),
         },
-        requestOptions(req.headers),
+        requestOptions(req.headers, req.signal),
       );
       return { audio: new Uint8Array(await resp.arrayBuffer()), mediaType: AUDIO_MEDIA_TYPES[format], usage: emptyUsage(), model };
     },

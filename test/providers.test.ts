@@ -6,13 +6,15 @@ import type { Message, ToolDefinition } from "../src/types";
 
 const TOOLS: ToolDefinition[] = [{ name: "lookup", description: "Look something up.", jsonSchema: { type: "object", properties: {} } }];
 
+type SentOptions = { headers?: Record<string, string>; signal?: AbortSignal };
+
 /** Captures the body + request options an SDK client would have been called with. */
 function captureAnthropic(reply: unknown[]) {
-  const sent: { body: Record<string, unknown>; options?: { headers?: Record<string, string> } }[] = [];
+  const sent: { body: Record<string, unknown>; options?: SentOptions }[] = [];
   const client = {
     messages: {
       create: async () => ({ content: reply }),
-      stream: (body: Record<string, unknown>, options?: { headers?: Record<string, string> }) => {
+      stream: (body: Record<string, unknown>, options?: SentOptions) => {
         sent.push({ body, options });
         return { finalMessage: async () => ({ content: reply, usage: { input_tokens: 5, output_tokens: 2 } }) };
       },
@@ -22,11 +24,11 @@ function captureAnthropic(reply: unknown[]) {
 }
 
 function captureOpenai(message: unknown) {
-  const sent: { body: Record<string, unknown>; options?: { headers?: Record<string, string> } }[] = [];
+  const sent: { body: Record<string, unknown>; options?: SentOptions }[] = [];
   const client = {
     chat: {
       completions: {
-        create: async (body: Record<string, unknown>, options?: { headers?: Record<string, string> }) => {
+        create: async (body: Record<string, unknown>, options?: SentOptions) => {
           sent.push({ body, options });
           return { choices: [{ message }], usage: { prompt_tokens: 5, completion_tokens: 2 } };
         },
@@ -118,6 +120,22 @@ describe("provider tool mapping", () => {
     const provider = openai({ model: "gpt-x", client: client as never, headers: { "X-Tenant": "juhi", "X-Trace": "base" } });
     await provider.text({ messages: [{ role: "user", content: "?" }], headers: { Authorization: "Bearer user-token", "X-Trace": "call" } });
     expect(sent[0]!.options?.headers).toEqual({ "X-Tenant": "juhi", "X-Trace": "call", Authorization: "Bearer user-token" });
+  });
+
+  it("openai: hands the AbortSignal to the SDK so the HTTP request itself can die", async () => {
+    const { client, sent } = captureOpenai({ content: "hi" });
+    const provider = openai({ model: "gpt-x", client: client as never });
+    const ac = new AbortController();
+    await provider.text({ messages: [{ role: "user", content: "?" }], signal: ac.signal });
+    expect(sent[0]!.options?.signal).toBe(ac.signal);
+  });
+
+  it("anthropic: hands the AbortSignal to the streaming call", async () => {
+    const { client, sent } = captureAnthropic([{ type: "text", text: "ok" }]);
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    const ac = new AbortController();
+    await provider.text({ messages: [{ role: "user", content: "?" }], signal: ac.signal });
+    expect(sent[0]!.options?.signal).toBe(ac.signal);
   });
 });
 

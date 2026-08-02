@@ -17,13 +17,13 @@ export function retrying(provider: Provider, cfg?: RetryConfig): Provider {
   return {
     name: provider.name,
     model: provider.model,
-    structured: (req) => withRetry(() => provider.structured(req), cfg),
-    text: (req) => withRetry(() => provider.text(req), cfg),
+    structured: (req) => withRetry(() => provider.structured(req), cfg, req.signal),
+    text: (req) => withRetry(() => provider.text(req), cfg, req.signal),
     // Optional capabilities are forwarded only where the provider has them, so `capability is missing`
     // stays detectable through the wrapper.
-    ...(provider.tools ? { tools: (req: Parameters<NonNullable<Provider["tools"]>>[0]) => withRetry(() => provider.tools!(req), cfg) } : {}),
-    ...(provider.transcribe ? { transcribe: (req: Parameters<NonNullable<Provider["transcribe"]>>[0]) => withRetry(() => provider.transcribe!(req), cfg) } : {}),
-    ...(provider.speak ? { speak: (req: Parameters<NonNullable<Provider["speak"]>>[0]) => withRetry(() => provider.speak!(req), cfg) } : {}),
+    ...(provider.tools ? { tools: (req: Parameters<NonNullable<Provider["tools"]>>[0]) => withRetry(() => provider.tools!(req), cfg, req.signal) } : {}),
+    ...(provider.transcribe ? { transcribe: (req: Parameters<NonNullable<Provider["transcribe"]>>[0]) => withRetry(() => provider.transcribe!(req), cfg, req.signal) } : {}),
+    ...(provider.speak ? { speak: (req: Parameters<NonNullable<Provider["speak"]>>[0]) => withRetry(() => provider.speak!(req), cfg, req.signal) } : {}),
   };
 }
 

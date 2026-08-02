@@ -1,7 +1,7 @@
 import { z, type ZodType } from "zod";
 import type { AIConfig } from "./config";
 import type { AudioFormat, AudioInput, Media, Message, Provider, Usage } from "./types";
-import { createClient, type ObjectResult, type SpeakResult, type TextResult, type TranscribeResult } from "./client";
+import { CoaxAbortError, createClient, type ObjectResult, type SpeakResult, type TextResult, type TranscribeResult } from "./client";
 import { createRegistry, retrying } from "./registry";
 import { parsePrompt, renderTemplate, type ParsedPrompt } from "./prompt-file";
 import { runLoop, type LoopOptions } from "./loop";
@@ -21,6 +21,8 @@ export interface ObjectCall<T> {
   cache?: boolean;
   /** Extra HTTP headers — e.g. forwarding the end user's token so the gateway authorizes per user. */
   headers?: Record<string, string>;
+  /** Cancel the call from outside (e.g. the BFF request died) — surfaces as CoaxAbortError. */
+  signal?: AbortSignal;
   /** Free-form label for observability (e.g. a role like "extraction"). */
   purpose?: string;
 }
@@ -33,6 +35,7 @@ export interface TextCall {
   maxTokens?: number;
   cache?: boolean;
   headers?: Record<string, string>;
+  signal?: AbortSignal;
   purpose?: string;
 }
 
@@ -51,6 +54,7 @@ export interface JudgeCall {
   /** For multimodal judging — e.g. a screenshot of the rendered artifact. */
   media?: Media[];
   headers?: Record<string, string>;
+  signal?: AbortSignal;
   purpose?: string;
 }
 
@@ -69,6 +73,7 @@ export interface TranscribeCall {
   /** Context hint — domain vocabulary, names, expected spelling. */
   prompt?: string;
   headers?: Record<string, string>;
+  signal?: AbortSignal;
   purpose?: string;
 }
 
@@ -80,6 +85,7 @@ export interface SpeakCall {
   speed?: number;
   instructions?: string;
   headers?: Record<string, string>;
+  signal?: AbortSignal;
   purpose?: string;
 }
 
@@ -125,12 +131,13 @@ export interface AI {
   speak(call: SpeakCall): Promise<SpeakResult>;
   /**
    * Load a `.prompt.md` file and return a callable. Pass `schema` for structured output, else text.
-   * The returned function fills the file's `{{ vars }}` and runs the call with the file's config.
+   * The returned function fills the file's `{{ vars }}` and runs the call with the file's config;
+   * its second parameter takes per-invocation options (an AbortSignal for cancellation).
    */
   prompt<T = string>(
     path: string,
     opts?: { schema?: ZodType<T>; model?: string },
-  ): (vars?: Record<string, unknown>) => Promise<T extends string ? TextResult : ObjectResult<T>>;
+  ): (vars?: Record<string, unknown>, call?: { signal?: AbortSignal }) => Promise<T extends string ? TextResult : ObjectResult<T>>;
 }
 
 async function readFile(path: string): Promise<string> {
@@ -170,7 +177,9 @@ export function createAI(config: AIConfig): AI {
     try {
       return await call(clientFor(primary, alias, purpose, false));
     } catch (err) {
-      if (!fallback) throw err;
+      // A user abort is not a model failure — retrying it on the fallback would resurrect the very
+      // request the caller just cancelled.
+      if (!fallback || err instanceof CoaxAbortError) throw err;
       return await call(clientFor(fallback, alias, purpose, true));
     }
   }
@@ -188,6 +197,7 @@ export function createAI(config: AIConfig): AI {
           maxRepairs: call.maxRepairs ?? d.maxRepairs,
           cache: call.cache ?? d.cache,
           headers: call.headers,
+          signal: call.signal,
         }),
       );
     },
@@ -201,6 +211,7 @@ export function createAI(config: AIConfig): AI {
           maxTokens: call.maxTokens ?? d.maxTokens,
           cache: call.cache ?? d.cache,
           headers: call.headers,
+          signal: call.signal,
         }),
       );
     },
@@ -217,7 +228,7 @@ export function createAI(config: AIConfig): AI {
       const system = call.system
         ?? `You are a strict, fair evaluator. Score the OUTPUT against the CRITERIA on a ${min}-${max} scale where ${max} fully meets them and ${min} fails. Judge only against the criteria; be specific in the rationale.`;
       const messages: Message[] = [{ role: "user", content: `CRITERIA:\n${criteria}\n\nOUTPUT:\n${output}`, ...(call.media ? { media: call.media } : {}) }];
-      const { data } = await api.object({ model: call.model, schema, system, messages, headers: call.headers, purpose: call.purpose ?? "judge" });
+      const { data } = await api.object({ model: call.model, schema, system, messages, headers: call.headers, signal: call.signal, purpose: call.purpose ?? "judge" });
       return { score: data.score, pass: data.score >= passScore, rationale: data.rationale };
     },
 
@@ -235,6 +246,7 @@ export function createAI(config: AIConfig): AI {
               maxTokens: call.maxTokens ?? d.maxTokens,
               cacheSystem: call.cache ?? d.cache,
               headers: call.headers,
+              signal: call.signal,
             }),
           {
             messages,
@@ -242,6 +254,7 @@ export function createAI(config: AIConfig): AI {
             context: call.context,
             maxSteps: call.maxSteps ?? d.maxSteps,
             budget: call.budget,
+            signal: call.signal,
             onToolCall: call.onToolCall,
           },
         ),
@@ -254,7 +267,7 @@ export function createAI(config: AIConfig): AI {
 
     transcribe(call: TranscribeCall): Promise<TranscribeResult> {
       return withFallback(call.model, call.model, call.purpose ?? "transcribe", (client) =>
-        client.transcribe({ audio: call.audio, language: call.language, prompt: call.prompt, headers: call.headers }),
+        client.transcribe({ audio: call.audio, language: call.language, prompt: call.prompt, headers: call.headers, signal: call.signal }),
       );
     },
 
@@ -267,22 +280,23 @@ export function createAI(config: AIConfig): AI {
           speed: call.speed,
           instructions: call.instructions,
           headers: call.headers,
+          signal: call.signal,
         }),
       );
     },
 
     prompt<T = string>(path: string, opts?: { schema?: ZodType<T>; model?: string }) {
       let parsed: ParsedPrompt | undefined;
-      return (async (vars: Record<string, unknown> = {}) => {
+      return (async (vars: Record<string, unknown> = {}, call?: { signal?: AbortSignal }) => {
         if (!parsed) parsed = parsePrompt(await readFile(path));
         const system = parsed.system ? renderTemplate(parsed.system, vars) : undefined;
         const user = renderTemplate(parsed.user, vars);
         const model = opts?.model ?? parsed.meta.model;
         if (opts?.schema) {
-          return api.object({ model, schema: opts.schema, system, prompt: user, maxRepairs: parsed.meta.maxRepairs, maxTokens: parsed.meta.maxTokens, purpose: parsed.meta.purpose });
+          return api.object({ model, schema: opts.schema, system, prompt: user, maxRepairs: parsed.meta.maxRepairs, maxTokens: parsed.meta.maxTokens, signal: call?.signal, purpose: parsed.meta.purpose });
         }
-        return api.text({ model, system, prompt: user, maxTokens: parsed.meta.maxTokens, purpose: parsed.meta.purpose });
-      }) as (vars?: Record<string, unknown>) => Promise<T extends string ? TextResult : ObjectResult<T>>;
+        return api.text({ model, system, prompt: user, maxTokens: parsed.meta.maxTokens, signal: call?.signal, purpose: parsed.meta.purpose });
+      }) as (vars?: Record<string, unknown>, call?: { signal?: AbortSignal }) => Promise<T extends string ? TextResult : ObjectResult<T>>;
     },
   };
 

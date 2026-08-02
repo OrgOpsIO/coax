@@ -16,9 +16,44 @@ import {
 } from "./types";
 
 export class CoaxSchemaError extends Error {
-  constructor(message: string, readonly lastError: string, readonly attempts: number) {
+  constructor(
+    message: string,
+    readonly lastError: string,
+    readonly attempts: number,
+    /** Usage summed across all attempts — the failed run still cost these tokens. */
+    readonly usage: Usage = emptyUsage(),
+  ) {
     super(message);
     this.name = "CoaxSchemaError";
+  }
+}
+
+/**
+ * Raised when a call is cancelled through its AbortSignal — the one error to check for "the user hung
+ * up", regardless of which layer (SDK, repair loop, tool run) the abort landed in. `usage` carries what
+ * the completed turns before the abort cost; the aborted call itself reports nothing.
+ */
+export class CoaxAbortError extends Error {
+  readonly usage: Usage;
+  constructor(usage?: Usage, cause?: unknown) {
+    super("coax: the call was aborted by its AbortSignal", cause === undefined ? undefined : { cause });
+    this.name = "CoaxAbortError";
+    this.usage = usage ?? emptyUsage();
+  }
+}
+
+/**
+ * Run one provider call under the caller's AbortSignal: fail fast when already aborted, and normalize
+ * whatever the SDK throws after an abort (APIUserAbortError, DOMException, …) to CoaxAbortError.
+ * `spent` supplies the usage accumulated so far in the surrounding loop.
+ */
+async function aborting<T>(signal: AbortSignal | undefined, spent: () => Usage, fn: () => Promise<T>): Promise<T> {
+  if (signal?.aborted) throw new CoaxAbortError(spent());
+  try {
+    return await fn();
+  } catch (err) {
+    if (signal?.aborted && !(err instanceof CoaxAbortError)) throw new CoaxAbortError(spent(), err);
+    throw err;
   }
 }
 
@@ -45,6 +80,8 @@ export interface ObjectRequest<T> {
   cache?: boolean;
   /** Extra HTTP headers for this call (e.g. forwarding the end user's identity to a gateway). */
   headers?: Record<string, string>;
+  /** Cancel the call (incl. repair rounds) — surfaces as CoaxAbortError. */
+  signal?: AbortSignal;
 }
 
 export interface ObjectResult<T> {
@@ -87,7 +124,7 @@ export interface Client {
   /** Typed, validated, self-repairing structured output. */
   object<T>(req: ObjectRequest<T>): Promise<ObjectResult<T>>;
   /** Free-form text (HTML, prose, reasoning) — no schema. */
-  text(req: { system?: string; prompt?: string; messages?: Message[]; maxTokens?: number; cache?: boolean; headers?: Record<string, string> }): Promise<TextResult>;
+  text(req: { system?: string; prompt?: string; messages?: Message[]; maxTokens?: number; cache?: boolean; headers?: Record<string, string>; signal?: AbortSignal }): Promise<TextResult>;
   /** One native tool-calling turn. `ai.run()` drives the loop over this. */
   tools(req: ToolsRequest): Promise<ToolsResponse>;
   /** Speech-to-text. Throws CoaxUnsupportedError where the endpoint has no transcription. */
@@ -126,15 +163,18 @@ export function createClient(opts: ClientOptions): Client {
       let lastError = "";
 
       for (let attempt = 0; attempt <= maxRepairs; attempt++) {
-        const res = await provider.structured({
-          system: req.system,
-          messages,
-          jsonSchema,
-          schemaName,
-          maxTokens: req.maxTokens,
-          cacheSystem: req.cache,
-          headers: req.headers,
-        });
+        const res = await aborting(req.signal, () => usage, () =>
+          provider.structured({
+            system: req.system,
+            messages,
+            jsonSchema,
+            schemaName,
+            maxTokens: req.maxTokens,
+            cacheSystem: req.cache,
+            headers: req.headers,
+            signal: req.signal,
+          }),
+        );
         usage = addUsage(usage, res.usage);
         model = res.model;
         await onUsage?.(res.usage, res.model);
@@ -151,35 +191,38 @@ export function createClient(opts: ClientOptions): Client {
         });
       }
 
-      throw new CoaxSchemaError(`coax: could not produce a valid "${schemaName}" after ${maxRepairs + 1} attempt(s)`, lastError, maxRepairs + 1);
+      throw new CoaxSchemaError(`coax: could not produce a valid "${schemaName}" after ${maxRepairs + 1} attempt(s)`, lastError, maxRepairs + 1, usage);
     },
 
     async text(req): Promise<TextResult> {
-      const res = await provider.text({
-        system: req.system,
-        messages: toMessages(req.prompt, req.messages),
-        maxTokens: req.maxTokens,
-        cacheSystem: req.cache,
-        headers: req.headers,
-      });
+      const res = await aborting(req.signal, emptyUsage, () =>
+        provider.text({
+          system: req.system,
+          messages: toMessages(req.prompt, req.messages),
+          maxTokens: req.maxTokens,
+          cacheSystem: req.cache,
+          headers: req.headers,
+          signal: req.signal,
+        }),
+      );
       await onUsage?.(res.usage, res.model);
       return { text: res.text, usage: res.usage, model: res.model };
     },
 
     async tools(req: ToolsRequest): Promise<ToolsResponse> {
-      const res = await capability("tools", "tool calling")(req);
+      const res = await aborting(req.signal, emptyUsage, () => capability("tools", "tool calling")(req));
       await onUsage?.(res.usage, res.model);
       return res;
     },
 
     async transcribe(req: TranscribeRequest): Promise<TranscribeResult> {
-      const res: TranscribeResponse = await capability("transcribe", "transcription")(req);
+      const res: TranscribeResponse = await aborting(req.signal, emptyUsage, () => capability("transcribe", "transcription")(req));
       await onUsage?.(res.usage, res.model);
       return { text: res.text, usage: res.usage, model: res.model };
     },
 
     async speak(req: SpeakRequest): Promise<SpeakResult> {
-      const res: SpeakResponse = await capability("speak", "speech synthesis")(req);
+      const res: SpeakResponse = await aborting(req.signal, emptyUsage, () => capability("speak", "speech synthesis")(req));
       await onUsage?.(res.usage, res.model);
       return { audio: res.audio, mediaType: res.mediaType, usage: res.usage, model: res.model };
     },

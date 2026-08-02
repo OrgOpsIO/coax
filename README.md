@@ -153,6 +153,33 @@ policy engine) can still decide:
 await ai.object({ model: "local", schema, prompt, headers: { Authorization: req.header("authorization")! } });
 ```
 
+### Cancelling a call
+
+Every call takes a `signal`. When it aborts, the HTTP request to the endpoint is aborted (the SDKs
+abort the underlying fetch, so the server sees the disconnect), and loops — repair rounds, `run()`,
+`loop()` — stop before starting another turn. Retries stop too, including waking early out of a
+backoff pause. The abort surfaces as one error, `CoaxAbortError`, regardless of which layer it landed
+in — and it is **never** retried on a fallback model.
+
+```ts
+const ac = new AbortController();
+req.on("close", () => ac.abort());   // the BFF request died → the upstream generation dies with it
+
+await ai.run({ model: "local", prompt: question, tools, signal: ac.signal });
+```
+
+One honest caveat: coax can only drop the connection to the endpoint. Anthropic, OpenAI, and the usual
+self-hosted runtimes (vLLM, …) stop generating on disconnect; a gateway in between must pass the
+disconnect upstream for the cancellation to reach the model server.
+
+### Failed runs still cost tokens
+
+A run that dies at a limit is booked, not lost: `CoaxToolError` and `CoaxLoopError` carry the `usage`
+summed over the completed turns plus the transcript up to the failure (`messages`, and `calls` for tool
+runs), `CoaxSchemaError` carries the usage of its failed attempts, and `CoaxAbortError` carries what was
+spent before the abort. The `onUsage` hook and any `Budget` see every turn as it happens either way —
+the error fields close the gap for callers who account from results.
+
 ## What's built in (so you don't hand-roll it every time)
 
 - **Typed contracts** — your Zod schema *is* the spec. `z.string().min(1)` means the model can't return empty.
@@ -161,6 +188,8 @@ await ai.object({ model: "local", schema, prompt, headers: { Authorization: req.
 - **Validate → repair** — on a schema miss, coax reprompts with the exact errors (up to `maxRepairs`).
 - **Retries** — transient errors (429/5xx/network) retried with exponential backoff.
 - **Model fallback** — a model alias can name a `fallback`; used automatically when the primary fails.
+- **Cancellation** — every call takes an `AbortSignal`; the HTTP request aborts, loops stop between
+  turns, and the abort surfaces as `CoaxAbortError` (never retried, never sent to the fallback).
 - **Prompt caching** — `cache: true` caches the system prompt at the provider (Anthropic `cache_control`;
   a no-op where caching is automatic). Big savings across a fan-out that shares a stable system prompt.
 - **Tools** — `ai.run()` hands the model typed tools and runs the whole call/validate/reply loop.
@@ -209,7 +238,8 @@ const { text, calls, usage } = await ai.run({
 
 Failures are **fed back, not thrown**: an invented tool name, arguments that miss the schema, or a handler
 that throws all return to the model as an error result so it can correct itself — the same
-validate-then-repair idea as structured output. Only exhausting `maxSteps` or the budget is fatal.
+validate-then-repair idea as structured output. Only exhausting `maxSteps` or the budget is fatal — and
+even that error carries the run's `usage`, `messages`, and `calls`, so the dead run is booked and debuggable.
 
 `result.messages` is the full transcript including calls and results — pass it back in as `messages` to
 continue the conversation on the next request.

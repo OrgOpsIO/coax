@@ -8,10 +8,24 @@ export function isTransient(err: unknown): boolean {
   return code === "ECONNRESET" || code === "ETIMEDOUT" || code === "ECONNREFUSED" || code === "EPIPE";
 }
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/** Waits `ms`, but wakes up immediately when `signal` aborts — a cancel must not sit out a 30s backoff. */
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    const timer = setTimeout(finish, ms);
+    function finish() {
+      signal?.removeEventListener("abort", finish);
+      clearTimeout(timer);
+      resolve();
+    }
+    signal?.addEventListener("abort", finish, { once: true });
+  });
 
-/** Run `fn`, retrying transient failures with exponential backoff. Non-transient errors throw immediately. */
-export async function withRetry<T>(fn: () => Promise<T>, cfg?: RetryConfig): Promise<T> {
+/**
+ * Run `fn`, retrying transient failures with exponential backoff. Non-transient errors throw
+ * immediately, and an aborted `signal` stops retrying — the last error is rethrown as-is (the
+ * client layer normalizes post-abort errors to CoaxAbortError).
+ */
+export async function withRetry<T>(fn: () => Promise<T>, cfg?: RetryConfig, signal?: AbortSignal): Promise<T> {
   const attempts = Math.max(1, cfg?.attempts ?? 3);
   const initial = cfg?.initialDelayMs ?? 500;
   const max = cfg?.maxDelayMs ?? 30_000;
@@ -21,8 +35,9 @@ export async function withRetry<T>(fn: () => Promise<T>, cfg?: RetryConfig): Pro
       return await fn();
     } catch (err) {
       lastErr = err;
-      if (attempt >= attempts || !isTransient(err)) throw err;
-      await sleep(Math.min(max, initial * 2 ** (attempt - 1)));
+      if (attempt >= attempts || !isTransient(err) || signal?.aborted) throw err;
+      await sleep(Math.min(max, initial * 2 ** (attempt - 1)), signal);
+      if (signal?.aborted) throw err;
     }
   }
   throw lastErr;

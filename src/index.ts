@@ -12,7 +12,7 @@ export { tool, runTools, CoaxToolError } from "./tools";
 export type { Tool, ToolContext, ToolInvocation, RunOptions, RunResult } from "./tools";
 
 // Low-level primitives (single provider, no config layer).
-export { createClient, CoaxSchemaError, CoaxUnsupportedError } from "./client";
+export { createClient, CoaxAbortError, CoaxSchemaError, CoaxUnsupportedError } from "./client";
 export type { Client, ClientOptions, ObjectRequest, ObjectResult, TextResult, TranscribeResult, SpeakResult } from "./client";
 export { createRegistry, retrying } from "./registry";
 export type { ResolvedModel } from "./registry";

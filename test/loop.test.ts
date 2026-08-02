@@ -3,7 +3,7 @@ import { z } from "zod";
 import { runLoop, CoaxLoopError } from "../src/loop";
 import { createBudget } from "../src/budget";
 import { emptyUsage } from "../src/types";
-import type { ObjectResult } from "../src/client";
+import { CoaxAbortError, type ObjectResult } from "../src/client";
 
 const Step = z.discriminatedUnion("action", [
   z.object({ action: z.literal("fetch"), query: z.string() }),
@@ -79,6 +79,38 @@ describe("runLoop", () => {
         onStep: async () => ({ done: false, reply: `r${n++}` }), // distinct replies, never done
       }),
     ).rejects.toThrow(/within 2 turns/);
+  });
+
+  it("books the completed turns on the error when maxTurns is exhausted", async () => {
+    const object = fakeObject([{ action: "fetch", query: "x" }]);
+    let n = 0;
+    const err: CoaxLoopError = await runLoop<StepT, string>(object as never, {
+      schema: Step,
+      messages: [{ role: "user", content: "?" }],
+      maxTurns: 2,
+      maxRepeat: 99,
+      onStep: async () => ({ done: false, reply: `r${n++}` }),
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(CoaxLoopError);
+    expect(err.usage.inputTokens).toBe(20); // two turns × 10 — the dead loop still cost tokens
+    expect(err.turns).toBe(2);
+    expect(err.messages.length).toBeGreaterThan(1); // the conversation survives for debugging
+  });
+
+  it("stops between turns once the signal aborts, booking what ran", async () => {
+    const ac = new AbortController();
+    const object = fakeObject([{ action: "fetch", query: "x" }]);
+    const err: CoaxAbortError = await runLoop<StepT, string>(object as never, {
+      schema: Step,
+      messages: [{ role: "user", content: "?" }],
+      signal: ac.signal,
+      onStep: async () => {
+        ac.abort(); // the caller hangs up between turns
+        return { done: false, reply: "next" };
+      },
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(CoaxAbortError);
+    expect(err.usage.inputTokens).toBe(10); // the one completed turn
   });
 });
 

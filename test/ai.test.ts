@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { createAI } from "../src/ai";
+import { CoaxAbortError } from "../src/client";
 import { tool } from "../src/tools";
 import { parsePrompt, renderTemplate } from "../src/prompt-file";
 import { emptyUsage, type Provider } from "../src/types";
@@ -80,6 +81,30 @@ describe("createAI", () => {
     const ai = createAI({ providers: { mock: factory }, models: { a: "mock:m" }, defaults: { retries: { attempts: 3, initialDelayMs: 1 } } });
     const { data } = await ai.object({ model: "a", schema: Out, prompt: "?" });
     expect(data.answer).toBe("ok");
+  });
+
+  it("does not resurrect an aborted call on the fallback model", async () => {
+    const ac = new AbortController();
+    const asked: string[] = [];
+    const factory = (model: string): Provider => ({
+      name: "mock",
+      model,
+      async structured() {
+        asked.push(model);
+        ac.abort(); // the caller hangs up mid-call; the SDK throws its abort error
+        throw Object.assign(new Error("Request was aborted."), { name: "APIUserAbortError" });
+      },
+      async text() {
+        return { raw: "", text: "", usage: emptyUsage(), model };
+      },
+    });
+    const ai = createAI({
+      providers: { mock: factory },
+      models: { smart: { use: "mock:primary", fallback: "mock:backup" } },
+      defaults: { retries: { attempts: 1 } },
+    });
+    await expect(ai.object({ model: "smart", schema: Out, prompt: "?", signal: ac.signal })).rejects.toBeInstanceOf(CoaxAbortError);
+    expect(asked).toEqual(["primary"]); // the backup was never asked to redo the cancelled work
   });
 });
 

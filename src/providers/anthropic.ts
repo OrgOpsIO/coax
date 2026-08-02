@@ -25,7 +25,7 @@ export interface AnthropicOptions {
 }
 
 type AnthropicResponse = { content: unknown[]; usage?: Record<string, number> };
-type RequestOptions = { headers?: Record<string, string> };
+type RequestOptions = { headers?: Record<string, string>; signal?: AbortSignal };
 type AnyClient = {
   messages: {
     create(body: Record<string, unknown>, options?: RequestOptions): Promise<AnthropicResponse>;
@@ -105,9 +105,14 @@ export function anthropic(opts: AnthropicOptions): Provider {
     return client;
   }
 
-  const requestOptions = (headers: Record<string, string> | undefined): RequestOptions | undefined => {
+  const requestOptions = (headers: Record<string, string> | undefined, signal: AbortSignal | undefined): RequestOptions | undefined => {
     const merged = { ...opts.headers, ...headers };
-    return Object.keys(merged).length ? { headers: merged } : undefined;
+    const out: RequestOptions = {
+      ...(Object.keys(merged).length ? { headers: merged } : {}),
+      // The SDK aborts the underlying HTTP request — the stream ends, the endpoint sees the disconnect.
+      ...(signal ? { signal } : {}),
+    };
+    return Object.keys(out).length ? out : undefined;
   };
 
   const textOf = (content: unknown[]): string =>
@@ -132,7 +137,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
           tool_choice: { type: "tool", name: req.schemaName },
           messages: toMessages(req.messages),
         },
-        requestOptions(req.headers),
+        requestOptions(req.headers, req.signal),
       );
       const tool = resp.content.find((b): b is { type: "tool_use"; input: unknown } => isBlock(b, "tool_use"));
       const raw = tool?.input;
@@ -149,7 +154,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
           ...systemParam(req.system, req.cacheSystem),
           messages: toMessages(req.messages),
         },
-        requestOptions(req.headers),
+        requestOptions(req.headers, req.signal),
       );
       const text = textOf(resp.content);
       return { raw: text, text, usage: mapUsage(resp.usage), model: opts.model };
@@ -166,7 +171,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
           tools: req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.jsonSchema })),
           messages: toMessages(req.messages),
         },
-        requestOptions(req.headers),
+        requestOptions(req.headers, req.signal),
       );
       const calls: ToolCall[] = resp.content
         .filter((b): b is { type: "tool_use"; id: string; name: string; input: unknown } => isBlock(b, "tool_use"))

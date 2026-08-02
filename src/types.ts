@@ -49,6 +49,12 @@ export interface Usage {
 /** Fields every generation call accepts. */
 interface BaseRequest {
   maxTokens?: number;
+  /**
+   * Cancel the call from outside — e.g. the BFF's incoming request died, so the upstream generation
+   * should die with it. Passed through to the SDK, which aborts the HTTP request to the endpoint;
+   * loops (repair rounds, tool runs) also stop between turns. Aborting surfaces as CoaxAbortError.
+   */
+  signal?: AbortSignal;
   /** Ask the provider to cache the (stable) system prompt — big savings across a fan-out of calls that
    *  share it. Provider-native where supported (Anthropic cache_control); a no-op where caching is
    *  automatic (OpenAI). */
@@ -107,6 +113,7 @@ export interface TranscribeRequest {
   /** Context hint — domain vocabulary, names, expected spelling. */
   prompt?: string;
   headers?: Record<string, string>;
+  signal?: AbortSignal;
 }
 
 export interface SpeakRequest {
@@ -119,6 +126,7 @@ export interface SpeakRequest {
   /** Free-form delivery instruction where the service supports it (tone, pace, emotion). */
   instructions?: string;
   headers?: Record<string, string>;
+  signal?: AbortSignal;
 }
 
 export interface ProviderResponse {

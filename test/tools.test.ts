@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { runTools, tool, CoaxToolError } from "../src/tools";
+import { CoaxAbortError } from "../src/client";
 import { createBudget } from "../src/budget";
 import { emptyUsage, type ToolsResponse, type Message, type ToolDefinition } from "../src/types";
 
@@ -164,5 +165,44 @@ describe("runTools", () => {
     await expect(
       runTools(callTools, { messages: [{ role: "user", content: "?" }], tools: [lookup], budget }),
     ).rejects.toThrow(/budget exhausted/);
+  });
+
+  it("books the completed turns on the error when maxSteps is exhausted", async () => {
+    const callTools = fakeTools([{ calls: [{ id: "c1", name: "lookup_invoice", input: { number: "R-1" } }] }]);
+    const err: CoaxToolError = await runTools(callTools, { messages: [{ role: "user", content: "?" }], tools: [lookup], maxSteps: 3 }).catch((e) => e);
+    expect(err).toBeInstanceOf(CoaxToolError);
+    expect(err.usage.inputTokens).toBe(30); // three turns × 10 — a dead run still cost tokens
+    expect(err.usage.outputTokens).toBe(12);
+    expect(err.steps).toBe(3);
+    expect(err.calls).toHaveLength(3);
+    // The transcript survives too — the audit trail of the run that died.
+    expect(err.messages.at(-1)).toMatchObject({ role: "user", toolResults: [{ id: "c1" }] });
+  });
+
+  it("books the completed turns on the budget error too", async () => {
+    const callTools = fakeTools([{ calls: [{ id: "c1", name: "lookup_invoice", input: { number: "R-1" } }] }]);
+    const budget = createBudget(20);
+    const err: CoaxToolError = await runTools(callTools, { messages: [{ role: "user", content: "?" }], tools: [lookup], budget }).catch((e) => e);
+    expect(err).toBeInstanceOf(CoaxToolError);
+    expect(err.usage.inputTokens).toBe(20); // two turns completed before the budget tripped
+    expect(err.steps).toBe(2);
+  });
+
+  it("stops between steps once the signal aborts, booking what ran", async () => {
+    const ac = new AbortController();
+    const hangUp = tool({
+      name: "lookup_invoice",
+      description: "Fetch one invoice by number.",
+      input: z.object({ number: z.string() }),
+      run: () => {
+        ac.abort(); // the caller hangs up while the tool is running
+        return { total: 42.5 };
+      },
+    });
+    const callTools = fakeTools([{ calls: [{ id: "c1", name: "lookup_invoice", input: { number: "R-1" } }] }]);
+    const err: CoaxAbortError = await runTools(callTools, { messages: [{ role: "user", content: "?" }], tools: [hangUp], signal: ac.signal }).catch((e) => e);
+    expect(err).toBeInstanceOf(CoaxAbortError);
+    expect(err.usage.inputTokens).toBe(10); // the one completed turn
+    expect(callTools.seen).toHaveLength(1); // no further model call was started
   });
 });
