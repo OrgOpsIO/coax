@@ -3,9 +3,11 @@ import type {
   Message,
   Provider,
   ProviderResponse,
+  ReasoningEffort,
   StructuredRequest,
   TextRequest,
   ToolCall,
+  ToolChoice,
   ToolsRequest,
   ToolsResponse,
   Usage,
@@ -22,6 +24,8 @@ export interface AnthropicOptions {
   baseURL?: string;
   /** Headers sent with every request (per-call `headers` are merged over these). */
   headers?: Record<string, string>;
+  /** Merged into every request body from this endpoint, under the per-call `extraBody`. See `ProviderEndpoint.extraBody`. */
+  extraBody?: Record<string, unknown>;
 }
 
 type AnthropicResponse = { content: unknown[]; usage?: Record<string, number> };
@@ -94,6 +98,42 @@ function systemParam(system: string | undefined, cache: boolean | undefined): Re
 
 const isBlock = (b: unknown, type: string): boolean => (b as { type?: string }).type === type;
 
+/**
+ * Flat merge, call wins over endpoint wins over coax's own body — same rule as `headers`. This CAN
+ * override coax's own fields (`max_tokens`, `tools`, …); that is the deliberate escape hatch described
+ * on `BaseRequest.extraBody`, not a bug to guard against here.
+ */
+function withExtraBody(body: Record<string, unknown>, endpointExtraBody: Record<string, unknown> | undefined, callExtraBody: Record<string, unknown> | undefined): Record<string, unknown> {
+  return { ...body, ...endpointExtraBody, ...callExtraBody };
+}
+
+// Anthropic's own budget, before the max_tokens cap below. Chosen to roughly track OpenAI's cheap/expensive
+// split at "none"/"low" vs "high" without pretending the two vendors' reasoning tokens are equivalent.
+const THINKING_BUDGETS: Record<"low" | "medium" | "high", number> = { low: 2048, medium: 8192, high: 16384 };
+
+// `"none"` sends no `thinking` field at all — Anthropic just answers directly, same as an endpoint that
+// never heard of reasoning effort. Anthropic REQUIRES budget_tokens < max_tokens (the model needs room
+// left to answer after it stops thinking) AND budget_tokens >= 1024, so the budget is capped relative
+// to whatever max_tokens this call actually resolved to — and below 2048 the two constraints can't
+// both hold, so that's a clear error here rather than a cryptic 400 from the endpoint.
+function thinkingParam(effort: ReasoningEffort | undefined, maxTokens: number): Record<string, unknown> {
+  if (!effort || effort === "none") return {};
+  if (maxTokens < 2048) {
+    throw new Error(
+      `coax: reasoningEffort "${effort}" needs maxTokens >= 2048 on Anthropic (got ${maxTokens}) — ` +
+        "the thinking budget must be at least 1024 and still leave room to answer. Raise maxTokens or drop the effort.",
+    );
+  }
+  const budget = Math.min(THINKING_BUDGETS[effort], maxTokens - 1024);
+  return { thinking: { type: "enabled", budget_tokens: budget } };
+}
+
+// Anthropic's tool_choice spells "required" as "any"; "auto"/"none" already match its own vocabulary.
+function toolChoiceParam(choice: ToolChoice | undefined): Record<string, unknown> {
+  if (!choice) return {};
+  return { tool_choice: { type: choice === "required" ? "any" : choice } };
+}
+
 export function anthropic(opts: AnthropicOptions): Provider {
   let client: AnyClient | undefined = opts.client as AnyClient | undefined;
 
@@ -127,16 +167,22 @@ export function anthropic(opts: AnthropicOptions): Provider {
 
     async structured(req: StructuredRequest): Promise<ProviderResponse> {
       const c = await getClient();
+      const maxTokens = req.maxTokens ?? opts.maxTokens ?? 8192;
       const resp = await createMessage(
         c,
-        {
-          model: opts.model,
-          max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
-          ...systemParam(req.system, req.cacheSystem),
-          tools: [{ name: req.schemaName, description: `Return a ${req.schemaName} object.`, input_schema: req.jsonSchema }],
-          tool_choice: { type: "tool", name: req.schemaName },
-          messages: toMessages(req.messages),
-        },
+        withExtraBody(
+          {
+            model: opts.model,
+            max_tokens: maxTokens,
+            ...systemParam(req.system, req.cacheSystem),
+            tools: [{ name: req.schemaName, description: `Return a ${req.schemaName} object.`, input_schema: req.jsonSchema }],
+            tool_choice: { type: "tool", name: req.schemaName },
+            messages: toMessages(req.messages),
+            ...thinkingParam(req.reasoningEffort, maxTokens),
+          },
+          opts.extraBody,
+          req.extraBody,
+        ),
         requestOptions(req.headers, req.signal),
       );
       const tool = resp.content.find((b): b is { type: "tool_use"; input: unknown } => isBlock(b, "tool_use"));
@@ -146,14 +192,20 @@ export function anthropic(opts: AnthropicOptions): Provider {
 
     async text(req: TextRequest): Promise<ProviderResponse> {
       const c = await getClient();
+      const maxTokens = req.maxTokens ?? opts.maxTokens ?? 8192;
       const resp = await createMessage(
         c,
-        {
-          model: opts.model,
-          max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
-          ...systemParam(req.system, req.cacheSystem),
-          messages: toMessages(req.messages),
-        },
+        withExtraBody(
+          {
+            model: opts.model,
+            max_tokens: maxTokens,
+            ...systemParam(req.system, req.cacheSystem),
+            messages: toMessages(req.messages),
+            ...thinkingParam(req.reasoningEffort, maxTokens),
+          },
+          opts.extraBody,
+          req.extraBody,
+        ),
         requestOptions(req.headers, req.signal),
       );
       const text = textOf(resp.content);
@@ -161,16 +213,31 @@ export function anthropic(opts: AnthropicOptions): Provider {
     },
 
     async tools(req: ToolsRequest): Promise<ToolsResponse> {
+      // v1 gap, deliberate: a `thinking` block on a tool turn needs to round-trip back on the next
+      // request, and `Message.content` is a plain string (see types.ts) — there is nowhere to keep it.
+      // Fail clearly instead of silently dropping the setting (or the model's thinking).
+      if (req.reasoningEffort && req.reasoningEffort !== "none") {
+        throw new Error(
+          `coax: reasoningEffort ("${req.reasoningEffort}") is not supported on the Anthropic tools() path yet — ` +
+            "thinking blocks would need to round-trip across tool turns, which coax's Message shape can't carry today. " +
+            'Drop reasoningEffort for this call (or leave it "none"), or run it on the OpenAI wire, where it works.',
+        );
+      }
       const c = await getClient();
       const resp = await createMessage(
         c,
-        {
-          model: opts.model,
-          max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
-          ...systemParam(req.system, req.cacheSystem),
-          tools: req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.jsonSchema })),
-          messages: toMessages(req.messages),
-        },
+        withExtraBody(
+          {
+            model: opts.model,
+            max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
+            ...systemParam(req.system, req.cacheSystem),
+            tools: req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.jsonSchema })),
+            messages: toMessages(req.messages),
+            ...toolChoiceParam(req.toolChoice),
+          },
+          opts.extraBody,
+          req.extraBody,
+        ),
         requestOptions(req.headers, req.signal),
       );
       const calls: ToolCall[] = resp.content

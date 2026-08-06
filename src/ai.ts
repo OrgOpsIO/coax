@@ -1,8 +1,8 @@
 import { z, type ZodType } from "zod";
 import type { AIConfig } from "./config";
-import type { AudioFormat, AudioInput, Media, Message, Provider, Usage } from "./types";
+import type { AudioFormat, AudioInput, Media, Message, Provider, ReasoningEffort, Usage } from "./types";
 import { CoaxAbortError, createClient, type ObjectResult, type SpeakResult, type TextResult, type TranscribeResult } from "./client";
-import { createRegistry, retrying } from "./registry";
+import { createRegistry, retrying, type CallSettings } from "./registry";
 import { parsePrompt, renderTemplate, type ParsedPrompt } from "./prompt-file";
 import { runLoop, type LoopOptions } from "./loop";
 import { runTools, type RunOptions, type RunResult, type Tool } from "./tools";
@@ -25,6 +25,10 @@ export interface ObjectCall<T> {
   signal?: AbortSignal;
   /** Free-form label for observability (e.g. a role like "extraction"). */
   purpose?: string;
+  /** How hard the model should think. Precedence: here > the model alias > `defaults.reasoningEffort`. */
+  reasoningEffort?: ReasoningEffort;
+  /** Merged flat into the wire body, last — MAY override coax's own fields. See `BaseRequest.extraBody`. */
+  extraBody?: Record<string, unknown>;
 }
 
 export interface TextCall {
@@ -37,6 +41,10 @@ export interface TextCall {
   headers?: Record<string, string>;
   signal?: AbortSignal;
   purpose?: string;
+  /** How hard the model should think. Precedence: here > the model alias > `defaults.reasoningEffort`. */
+  reasoningEffort?: ReasoningEffort;
+  /** Merged flat into the wire body, last — MAY override coax's own fields. See `BaseRequest.extraBody`. */
+  extraBody?: Record<string, unknown>;
 }
 
 export interface JudgeCall {
@@ -99,6 +107,10 @@ export interface RunCall<C = unknown> extends Omit<RunOptions<C>, "tools"> {
   cache?: boolean;
   headers?: Record<string, string>;
   purpose?: string;
+  /** How hard the model should think. Precedence: here > the model alias > `defaults.reasoningEffort`. */
+  reasoningEffort?: ReasoningEffort;
+  /** Merged flat into the wire body, last — MAY override coax's own fields. See `BaseRequest.extraBody`. */
+  extraBody?: Record<string, unknown>;
 }
 
 export interface AI {
@@ -162,31 +174,39 @@ export function createAI(config: AIConfig): AI {
 
   /**
    * Resolve the model, run `call` against the primary, and fall back to the alias' fallback model on
-   * ANY failure. Shared by every capability so fallback behaves identically across them.
+   * ANY failure. Shared by every capability so fallback behaves identically across them. `call` also
+   * receives the alias' `callSettings` (currently just `reasoningEffort`) so the caller can apply the
+   * per-call > alias > defaults precedence without the registry's cache key ever seeing it (see
+   * `ResolvedModel.callSettings`).
    */
   async function withFallback<R>(
     modelRef: string | undefined,
     requested: string | undefined,
     purpose: string | undefined,
-    call: (client: ReturnType<typeof clientFor>) => Promise<R>,
+    call: (client: ReturnType<typeof clientFor>, callSettings: CallSettings) => Promise<R>,
   ): Promise<R> {
     const ref = modelRef ?? d.model;
     if (!ref) throw new Error("coax: no model given and no defaults.model configured");
-    const { primary, fallback } = registry.resolve(ref);
+    const { primary, fallback, callSettings } = registry.resolve(ref);
     const alias = aliasOf(requested);
     try {
-      return await call(clientFor(primary, alias, purpose, false));
+      return await call(clientFor(primary, alias, purpose, false), callSettings);
     } catch (err) {
       // A user abort is not a model failure — retrying it on the fallback would resurrect the very
       // request the caller just cancelled.
       if (!fallback || err instanceof CoaxAbortError) throw err;
-      return await call(clientFor(fallback, alias, purpose, true));
+      return await call(clientFor(fallback, alias, purpose, true), callSettings);
     }
+  }
+
+  /** Per-call > alias > `defaults.reasoningEffort` — the precedence every capability applies identically. */
+  function reasoningEffortFor(callValue: ReasoningEffort | undefined, callSettings: CallSettings): ReasoningEffort | undefined {
+    return callValue ?? callSettings.reasoningEffort ?? d.reasoningEffort;
   }
 
   const api: AI = {
     object<T>(call: ObjectCall<T>): Promise<ObjectResult<T>> {
-      return withFallback(call.model, call.model, call.purpose, (client) =>
+      return withFallback(call.model, call.model, call.purpose, (client, callSettings) =>
         client.object({
           schema: call.schema,
           schemaName: call.schemaName,
@@ -198,12 +218,14 @@ export function createAI(config: AIConfig): AI {
           cache: call.cache ?? d.cache,
           headers: call.headers,
           signal: call.signal,
+          reasoningEffort: reasoningEffortFor(call.reasoningEffort, callSettings),
+          extraBody: call.extraBody,
         }),
       );
     },
 
     text(call: TextCall): Promise<TextResult> {
-      return withFallback(call.model, call.model, call.purpose, (client) =>
+      return withFallback(call.model, call.model, call.purpose, (client, callSettings) =>
         client.text({
           system: call.system,
           prompt: call.prompt,
@@ -212,6 +234,8 @@ export function createAI(config: AIConfig): AI {
           cache: call.cache ?? d.cache,
           headers: call.headers,
           signal: call.signal,
+          reasoningEffort: reasoningEffortFor(call.reasoningEffort, callSettings),
+          extraBody: call.extraBody,
         }),
       );
     },
@@ -236,26 +260,32 @@ export function createAI(config: AIConfig): AI {
     async run<C = unknown>(call: RunCall<C>): Promise<RunResult> {
       const messages = call.messages?.length ? call.messages : call.prompt != null ? [{ role: "user" as const, content: call.prompt }] : undefined;
       if (!messages) throw new Error("coax: provide either `prompt` or `messages`");
-      return withFallback(call.model, call.model, call.purpose, (client) =>
+      return withFallback(call.model, call.model, call.purpose, (client, callSettings) =>
         runTools<C>(
           (req) =>
             client.tools({
               system: call.system,
               messages: req.messages,
               tools: req.tools,
+              toolChoice: req.toolChoice,
               maxTokens: call.maxTokens ?? d.maxTokens,
               cacheSystem: call.cache ?? d.cache,
               headers: call.headers,
               signal: call.signal,
+              reasoningEffort: reasoningEffortFor(call.reasoningEffort, callSettings),
+              extraBody: call.extraBody,
             }),
           {
             messages,
             tools: call.tools,
             context: call.context,
-            maxSteps: call.maxSteps ?? d.maxSteps,
+            // `call.maxSteps` may legitimately BE `null` (unlimited) — `??` would treat that as "not
+            // set" and fall through to `d.maxSteps`, which is wrong; only `undefined` defers to defaults.
+            maxSteps: call.maxSteps !== undefined ? call.maxSteps : d.maxSteps,
             budget: call.budget,
             signal: call.signal,
             onToolCall: call.onToolCall,
+            toolChoice: call.toolChoice,
           },
         ),
       );

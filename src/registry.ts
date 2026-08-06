@@ -1,8 +1,13 @@
 import type { AIConfig, ProviderEndpoint, RetryConfig } from "./config";
-import type { Provider } from "./types";
+import type { Provider, ReasoningEffort } from "./types";
 import { anthropic } from "./providers/anthropic";
 import { openai } from "./providers/openai";
 import { withRetry } from "./retry";
+
+/** Settings that ride on the model alias itself rather than the provider instance — see `resolve()`. */
+export interface CallSettings {
+  reasoningEffort?: ReasoningEffort;
+}
 
 export interface ResolvedModel {
   primary: Provider;
@@ -10,6 +15,13 @@ export interface ResolvedModel {
   providerName: string;
   /** The resolved "provider:model". */
   ref: string;
+  /**
+   * Alias-level settings that must NOT become part of the provider cache key (`${providerName}:${model}`,
+   * see `providerFor` below) — two aliases pointing at the same model but different `reasoningEffort`
+   * would otherwise fight over one cached provider instance. The caller (`ai.ts`) merges this into the
+   * request instead.
+   */
+  callSettings: CallSettings;
 }
 
 /** Wrap a provider so its calls retry transient errors (rate limits / 5xx / network). */
@@ -40,7 +52,7 @@ export function createRegistry(config: AIConfig) {
           `— only "anthropic" and "openai" are inferred from the name`,
       );
     }
-    const common = { model, apiKey: spec.apiKey, baseURL: spec.baseURL, headers: spec.headers };
+    const common = { model, apiKey: spec.apiKey, baseURL: spec.baseURL, headers: spec.headers, extraBody: spec.extraBody };
     return api === "anthropic"
       ? anthropic(common)
       : openai({ ...common, transcribeModel: spec.transcribeModel, speakModel: spec.speakModel });
@@ -75,14 +87,15 @@ export function createRegistry(config: AIConfig) {
     const alias = config.models?.[ref];
     let use = ref;
     let fallbackRef: string | undefined;
+    let reasoningEffort: ReasoningEffort | undefined;
     if (typeof alias === "string") use = alias;
-    else if (alias) { use = alias.use; fallbackRef = alias.fallback; }
+    else if (alias) { use = alias.use; fallbackRef = alias.fallback; reasoningEffort = alias.reasoningEffort; }
 
     const p = splitRef(use);
     const primary = providerFor(p.providerName, p.model);
     let fallback: Provider | undefined;
     if (fallbackRef) { const f = splitRef(fallbackRef); fallback = providerFor(f.providerName, f.model); }
-    return { primary, fallback, providerName: p.providerName, ref: use };
+    return { primary, fallback, providerName: p.providerName, ref: use, callSettings: { reasoningEffort } };
   }
 
   return { resolve };

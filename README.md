@@ -153,6 +153,51 @@ policy engine) can still decide:
 await ai.object({ model: "local", schema, prompt, headers: { Authorization: req.header("authorization")! } });
 ```
 
+### Reasoning effort
+
+`reasoningEffort: "none" | "low" | "medium" | "high"` controls how hard the model thinks — the biggest
+lever for cost and latency on calls that don't need it (classification, reformatting, anything that isn't
+genuinely hard). It hangs on the model alias (so two aliases on the *same* underlying model can think
+differently), on `defaults`, and per call — precedence is **call > alias > defaults**:
+
+```ts
+configure({
+  models: {
+    classify:  { use: "orgops:qwen3-vl", reasoningEffort: "none" },  // never thinks
+    synthesize: { use: "orgops:qwen3-vl", reasoningEffort: "high" }, // same model, different alias
+  },
+});
+
+await ai.text({ model: "classify", prompt });                          // "none", from the alias
+await ai.text({ model: "classify", prompt, reasoningEffort: "low" });  // overridden for this one call
+```
+
+Sent on the wire only where set — an endpoint that has never heard of it never sees the field. OpenAI
+gets `reasoning_effort` with the literal value; Anthropic gets `thinking: { type: "enabled", budget_tokens }`
+(budget derived from the effort, capped below `max_tokens`), or no `thinking` field at all for `"none"`.
+
+One v1 gap: `reasoningEffort` on Anthropic's `tools()` path isn't supported yet — a `low`/`medium`/`high`
+effort there throws a clear error rather than silently doing nothing (thinking blocks would need to
+round-trip across tool turns, which is its own piece of work). `"none"` is fine there, since there is
+nothing to round-trip.
+
+### The `extraBody` escape hatch
+
+Whatever the next gateway needs that coax has no first-class field for — `temperature`, `top_p`, a
+vendor-specific `chat_template_kwargs` — goes straight into the wire body, per endpoint and per call:
+
+```ts
+configure({
+  providers: { orgops: { apiKey, baseURL, api: "openai", extraBody: { temperature: 0.6, top_p: 0.95 } } },
+});
+
+await ai.text({ model: "local", prompt, extraBody: { chat_template_kwargs: { enable_thinking: false } } });
+```
+
+Flat merge, same rule as `headers`: call over endpoint over coax's own body. No whitelisting — and it
+**may** override coax's own fields (`max_tokens`, `tools`, …). That is deliberate: an escape hatch that
+can't be overridden by anything isn't one. Overriding a field coax itself relies on is your own risk.
+
 ### Cancelling a call
 
 Every call takes a `signal`. When it aborts, the HTTP request to the endpoint is aborted (the SDKs
@@ -174,11 +219,30 @@ disconnect upstream for the cancellation to reach the model server.
 
 ### Failed runs still cost tokens
 
-A run that dies at a limit is booked, not lost: `CoaxToolError` and `CoaxLoopError` carry the `usage`
-summed over the completed turns plus the transcript up to the failure (`messages`, and `calls` for tool
-runs), `CoaxSchemaError` carries the usage of its failed attempts, and `CoaxAbortError` carries what was
-spent before the abort. The `onUsage` hook and any `Budget` see every turn as it happens either way —
-the error fields close the gap for callers who account from results.
+A run that dies is booked, not lost: `CoaxToolError` and `CoaxLoopError` carry the `usage` summed over the
+completed turns plus the transcript up to the failure (`messages`, and `calls` for tool runs),
+`CoaxSchemaError` carries the usage *and* the transcript (including every repair reprompt) of its failed
+attempts, and `CoaxAbortError` carries what was spent before the abort — plus `messages`/`calls` when the
+abort happened inside `ai.run()`, so an aborted run is exactly as resumable as one that hit a limit. The
+`onUsage` hook and any `Budget` see every turn as it happens either way — the error fields close the gap
+for callers who account from results.
+
+**Breaking in 0.6:** `ai.run()` now wraps *every* failed model call — not just hitting `maxSteps` or the
+budget — in `CoaxToolError`, with the original error as `.cause` and the same partial state riding along.
+Code that used to catch a raw provider error (a 502, a timeout, …) around `ai.run()` now sees
+`CoaxToolError`; check `err.cause` for the original, and `err.messages`/`err.calls` to resume:
+
+```ts
+try {
+  return await ai.run({ model, prompt, tools });
+} catch (err) {
+  if (err instanceof CoaxToolError) {
+    log(err.cause);                                            // the 502, the timeout, whatever it was
+    return ai.run({ model, messages: err.messages, tools });    // pick up exactly where it died
+  }
+  throw err;
+}
+```
 
 ## What's built in (so you don't hand-roll it every time)
 
@@ -198,6 +262,11 @@ the error fields close the gap for callers who account from results.
 - **Usage** — one `onUsage(usage, meta)` hook across every call, plus summed `usage` on each result.
 - **Vision** — image/pdf media are first-class.
 - **Voice** — `ai.transcribe()` / `ai.speak()` where the endpoint serves them, with a precise error where it doesn't.
+- **Reasoning effort** — `reasoningEffort: "none" | "low" | "medium" | "high"` per call, per model alias,
+  or as a default; mapped to each provider's native wire field, sent only where set.
+- **`extraBody`** — a generic, un-whitelisted escape hatch into the wire body, per endpoint and per call,
+  for whatever the next gateway needs that coax doesn't have a first-class field for.
+- **`toolChoice`** — force/forbid tool calls per run, constant or step-indexed (`"auto" | "required" | "none"`).
 
 ```ts
 const { data, usage, repairs } = await ai.object({ schema, prompt, maxRepairs: 3 });
@@ -238,11 +307,28 @@ const { text, calls, usage } = await ai.run({
 
 Failures are **fed back, not thrown**: an invented tool name, arguments that miss the schema, or a handler
 that throws all return to the model as an error result so it can correct itself — the same
-validate-then-repair idea as structured output. Only exhausting `maxSteps` or the budget is fatal — and
-even that error carries the run's `usage`, `messages`, and `calls`, so the dead run is booked and debuggable.
+validate-then-repair idea as structured output. Exhausting `maxSteps`/the budget, or the model call itself
+failing, is fatal — and that error carries the run's `usage`, `messages`, and `calls`, so the dead run is
+booked and debuggable (see [Failed runs still cost tokens](#failed-runs-still-cost-tokens)).
 
 `result.messages` is the full transcript including calls and results — pass it back in as `messages` to
 continue the conversation on the next request.
+
+**Forcing a tool call.** `toolChoice: "required"` makes a turn call a tool instead of answering —
+useful for step 0 ("search before you answer"), pointless as a constant (the model can then *never*
+answer, so the run always ends in the `maxSteps` error). Pass a function instead, evaluated per step:
+
+```ts
+await ai.run({
+  model: "local", prompt: question, tools: [search, answer],
+  toolChoice: (step) => (step === 0 ? "required" : "auto"),   // force the first lookup, then let it decide
+});
+```
+
+**Unlimited steps.** `maxSteps` also accepts `null` — but only together with a `budget` or a `signal`;
+`null` alone throws immediately (`"unlimited without a brake is not a limit, it's a prayer"`). A step
+count picked because *something* had to be picked is a pseudo-limit; a budget or a signal is an honest
+reason to stop.
 
 ### Voice
 

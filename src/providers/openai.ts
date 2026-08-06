@@ -35,6 +35,8 @@ export interface OpenAiOptions {
    */
   transcribeModel?: string;
   speakModel?: string;
+  /** Merged into every request body from this endpoint, under the per-call `extraBody`. See `ProviderEndpoint.extraBody`. */
+  extraBody?: Record<string, unknown>;
 }
 
 type ChatMessage = { content?: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[] };
@@ -98,6 +100,15 @@ function toMessages(system: string | undefined, messages: Message[]): unknown[] 
   return out;
 }
 
+/**
+ * Flat merge, call wins over endpoint wins over coax's own body — same rule as `headers`. This CAN
+ * override coax's own fields (`max_tokens`, `tools`, …); that is the deliberate escape hatch described
+ * on `BaseRequest.extraBody`, not a bug to guard against here.
+ */
+function withExtraBody(body: Record<string, unknown>, endpointExtraBody: Record<string, unknown> | undefined, callExtraBody: Record<string, unknown> | undefined): Record<string, unknown> {
+  return { ...body, ...endpointExtraBody, ...callExtraBody };
+}
+
 /** Arguments arrive as a JSON string; a malformed one becomes `{}` so schema validation reports it. */
 function parseArguments(raw: string): unknown {
   try {
@@ -158,13 +169,18 @@ export function openai(opts: OpenAiOptions): Provider {
     async structured(req: StructuredRequest): Promise<ProviderResponse> {
       const c = await getClient();
       const resp = await c.chat.completions.create(
-        {
-          model: opts.model,
-          max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
-          messages: toMessages(req.system, req.messages),
-          tools: [{ type: "function", function: { name: req.schemaName, description: `Return a ${req.schemaName} object.`, parameters: req.jsonSchema } }],
-          tool_choice: { type: "function", function: { name: req.schemaName } },
-        },
+        withExtraBody(
+          {
+            model: opts.model,
+            max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
+            messages: toMessages(req.system, req.messages),
+            tools: [{ type: "function", function: { name: req.schemaName, description: `Return a ${req.schemaName} object.`, parameters: req.jsonSchema } }],
+            tool_choice: { type: "function", function: { name: req.schemaName } },
+            ...(req.reasoningEffort ? { reasoning_effort: req.reasoningEffort } : {}),
+          },
+          opts.extraBody,
+          req.extraBody,
+        ),
         requestOptions(req.headers, req.signal),
       );
       const args = resp.choices[0]?.message?.tool_calls?.[0]?.function?.arguments ?? "";
@@ -174,11 +190,16 @@ export function openai(opts: OpenAiOptions): Provider {
     async text(req: TextRequest): Promise<ProviderResponse> {
       const c = await getClient();
       const resp = await c.chat.completions.create(
-        {
-          model: opts.model,
-          max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
-          messages: toMessages(req.system, req.messages),
-        },
+        withExtraBody(
+          {
+            model: opts.model,
+            max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
+            messages: toMessages(req.system, req.messages),
+            ...(req.reasoningEffort ? { reasoning_effort: req.reasoningEffort } : {}),
+          },
+          opts.extraBody,
+          req.extraBody,
+        ),
         requestOptions(req.headers, req.signal),
       );
       const text = resp.choices[0]?.message?.content ?? "";
@@ -188,13 +209,19 @@ export function openai(opts: OpenAiOptions): Provider {
     async tools(req: ToolsRequest): Promise<ToolsResponse> {
       const c = await getClient();
       const resp = await c.chat.completions.create(
-        {
-          model: opts.model,
-          max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
-          messages: toMessages(req.system, req.messages),
-          tools: req.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.jsonSchema } })),
-          tool_choice: "auto",
-        },
+        withExtraBody(
+          {
+            model: opts.model,
+            max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
+            messages: toMessages(req.system, req.messages),
+            tools: req.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.jsonSchema } })),
+            // Literal values match the OpenAI wire directly; unset keeps today's hardcoded "auto".
+            tool_choice: req.toolChoice ?? "auto",
+            ...(req.reasoningEffort ? { reasoning_effort: req.reasoningEffort } : {}),
+          },
+          opts.extraBody,
+          req.extraBody,
+        ),
         requestOptions(req.headers, req.signal),
       );
       const message = resp.choices[0]?.message;

@@ -15,7 +15,7 @@ export type { Tool, ToolContext, ToolInvocation, RunOptions, RunResult } from ".
 export { createClient, CoaxAbortError, CoaxSchemaError, CoaxUnsupportedError } from "./client";
 export type { Client, ClientOptions, ObjectRequest, ObjectResult, TextResult, TranscribeResult, SpeakResult } from "./client";
 export { createRegistry, retrying } from "./registry";
-export type { ResolvedModel } from "./registry";
+export type { CallSettings, ResolvedModel } from "./registry";
 export { withRetry, isTransient } from "./retry";
 export { runLoop, CoaxLoopError } from "./loop";
 export type { LoopOptions, LoopControl } from "./loop";
@@ -39,11 +39,13 @@ export type {
   Message,
   Provider,
   ProviderResponse,
+  ReasoningEffort,
   SpeakRequest,
   SpeakResponse,
   StructuredRequest,
   TextRequest,
   ToolCall,
+  ToolChoice,
   ToolDefinition,
   ToolResult,
   ToolsRequest,

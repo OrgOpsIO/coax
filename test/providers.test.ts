@@ -139,6 +139,121 @@ describe("provider tool mapping", () => {
   });
 });
 
+describe("reasoningEffort", () => {
+  it("openai: sends reasoning_effort literally, only when set", async () => {
+    const { client, sent } = captureOpenai({ content: "hi" });
+    const provider = openai({ model: "gpt-x", client: client as never });
+    await provider.text({ messages: [{ role: "user", content: "?" }], reasoningEffort: "none" });
+    await provider.text({ messages: [{ role: "user", content: "?" }] });
+    expect(sent[0]!.body.reasoning_effort).toBe("none");
+    expect(sent[1]!.body).not.toHaveProperty("reasoning_effort"); // an endpoint that doesn't know the field must never see it
+  });
+
+  it("openai: reasoningEffort rides on structured() and tools() too", async () => {
+    const { client, sent } = captureOpenai({ content: "", tool_calls: [] });
+    const provider = openai({ model: "gpt-x", client: client as never });
+    await provider.structured({ messages: [{ role: "user", content: "?" }], jsonSchema: { type: "object" }, schemaName: "out", reasoningEffort: "high" });
+    await provider.tools!({ messages: [{ role: "user", content: "?" }], tools: TOOLS, reasoningEffort: "low" });
+    expect(sent[0]!.body.reasoning_effort).toBe("high");
+    expect(sent[1]!.body.reasoning_effort).toBe("low");
+  });
+
+  it("anthropic: \"none\" sends no thinking field", async () => {
+    const { client, sent } = captureAnthropic([{ type: "text", text: "ok" }]);
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    await provider.text({ messages: [{ role: "user", content: "?" }], reasoningEffort: "none" });
+    expect(sent[0]!.body).not.toHaveProperty("thinking");
+  });
+
+  it("anthropic: low/medium/high enable thinking with the matching budget", async () => {
+    const { client, sent } = captureAnthropic([{ type: "text", text: "ok" }]);
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    // A generous max_tokens so none of the three budgets get capped — isolates the per-effort mapping
+    // from the max_tokens - 1024 cap, which has its own test below.
+    await provider.text({ messages: [{ role: "user", content: "?" }], reasoningEffort: "low", maxTokens: 20_000 });
+    await provider.text({ messages: [{ role: "user", content: "?" }], reasoningEffort: "medium", maxTokens: 20_000 });
+    await provider.text({ messages: [{ role: "user", content: "?" }], reasoningEffort: "high", maxTokens: 20_000 });
+    expect(sent[0]!.body.thinking).toEqual({ type: "enabled", budget_tokens: 2048 });
+    expect(sent[1]!.body.thinking).toEqual({ type: "enabled", budget_tokens: 8192 });
+    expect(sent[2]!.body.thinking).toEqual({ type: "enabled", budget_tokens: 16384 });
+  });
+
+  it("anthropic: caps the thinking budget at max_tokens - 1024", async () => {
+    const { client, sent } = captureAnthropic([{ type: "text", text: "ok" }]);
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    await provider.text({ messages: [{ role: "user", content: "?" }], reasoningEffort: "high", maxTokens: 4096 });
+    expect(sent[0]!.body.thinking).toEqual({ type: "enabled", budget_tokens: 3072 }); // capped, not the full 16384
+  });
+
+  it("anthropic: rejects thinking when max_tokens can't fit budget + answer, instead of sending an invalid budget", async () => {
+    const { client } = captureAnthropic([{ type: "text", text: "ok" }]);
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    // 1500 - 1024 = 476, below Anthropic's 1024 minimum — the endpoint would 400. coax says why first.
+    await expect(
+      provider.text({ messages: [{ role: "user", content: "?" }], reasoningEffort: "low", maxTokens: 1500 }),
+    ).rejects.toThrow(/maxTokens >= 2048/);
+  });
+
+  it("anthropic: reasoningEffort on the tools() path throws a clear error (v1 gap)", async () => {
+    const { client } = captureAnthropic([{ type: "text", text: "ok" }]);
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    await expect(
+      provider.tools!({ messages: [{ role: "user", content: "?" }], tools: TOOLS, reasoningEffort: "low" }),
+    ).rejects.toThrow(/tools\(\) path/);
+  });
+
+  it("anthropic: reasoningEffort \"none\" is fine on the tools() path — nothing to round-trip", async () => {
+    const { client, sent } = captureAnthropic([{ type: "text", text: "ok" }]);
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    await provider.tools!({ messages: [{ role: "user", content: "?" }], tools: TOOLS, reasoningEffort: "none" });
+    expect(sent[0]!.body).not.toHaveProperty("thinking");
+  });
+});
+
+describe("extraBody", () => {
+  it("openai: merges endpoint under call, call wins, and either MAY override coax's own fields", async () => {
+    const { client, sent } = captureOpenai({ content: "hi" });
+    const provider = openai({ model: "gpt-x", client: client as never, extraBody: { temperature: 0.6, top_p: 0.95 } });
+    await provider.text({ messages: [{ role: "user", content: "?" }], extraBody: { temperature: 0.2, max_tokens: 999 } });
+    expect(sent[0]!.body.temperature).toBe(0.2); // call beats endpoint
+    expect(sent[0]!.body.top_p).toBe(0.95); // endpoint alone still applies
+    expect(sent[0]!.body.max_tokens).toBe(999); // extraBody may override coax's own field, on purpose
+  });
+
+  it("anthropic: merges endpoint under call across structured/text/tools", async () => {
+    const { client, sent } = captureAnthropic([{ type: "text", text: "ok" }]);
+    const provider = anthropic({ model: "claude-x", client: client as never, extraBody: { top_p: 0.9 } });
+    await provider.text({ messages: [{ role: "user", content: "?" }], extraBody: { top_p: 0.5 } });
+    await provider.tools!({ messages: [{ role: "user", content: "?" }], tools: TOOLS, extraBody: { top_p: 0.4 } });
+    expect(sent[0]!.body.top_p).toBe(0.5);
+    expect(sent[1]!.body.top_p).toBe(0.4);
+  });
+});
+
+describe("toolChoice", () => {
+  it("openai: sends the literal value, and defaults to \"auto\" when unset (unchanged behavior)", async () => {
+    const { client, sent } = captureOpenai({ content: "", tool_calls: [] });
+    const provider = openai({ model: "gpt-x", client: client as never });
+    await provider.tools!({ messages: [{ role: "user", content: "?" }], tools: TOOLS, toolChoice: "required" });
+    await provider.tools!({ messages: [{ role: "user", content: "?" }], tools: TOOLS });
+    expect(sent[0]!.body.tool_choice).toBe("required");
+    expect(sent[1]!.body.tool_choice).toBe("auto");
+  });
+
+  it("anthropic: maps required/auto/none to Anthropic's own vocabulary, and omits the field when unset", async () => {
+    const { client, sent } = captureAnthropic([{ type: "text", text: "ok" }]);
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    await provider.tools!({ messages: [{ role: "user", content: "?" }], tools: TOOLS, toolChoice: "required" });
+    await provider.tools!({ messages: [{ role: "user", content: "?" }], tools: TOOLS, toolChoice: "auto" });
+    await provider.tools!({ messages: [{ role: "user", content: "?" }], tools: TOOLS, toolChoice: "none" });
+    await provider.tools!({ messages: [{ role: "user", content: "?" }], tools: TOOLS });
+    expect(sent[0]!.body.tool_choice).toEqual({ type: "any" });
+    expect(sent[1]!.body.tool_choice).toEqual({ type: "auto" });
+    expect(sent[2]!.body.tool_choice).toEqual({ type: "none" });
+    expect(sent[3]!.body).not.toHaveProperty("tool_choice"); // today's behavior: no field at all
+  });
+});
+
 describe("registry: compatible endpoints", () => {
   it("builds a freely named provider from an endpoint with an explicit api", () => {
     const registry = createRegistry({

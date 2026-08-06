@@ -15,6 +15,26 @@ export interface ToolCall {
   input: unknown;
 }
 
+/**
+ * How hard the model should think before answering. `"none"` turns thinking off outright — the biggest
+ * lever for cutting latency/cost on calls that don't need it (classification, reformatting). Not every
+ * endpoint understands this; it is only sent on the wire where explicitly set (see BaseRequest.reasoningEffort).
+ */
+export type ReasoningEffort = "none" | "low" | "medium" | "high";
+
+/** Restricts how the model may respond a turn. `"required"` forbids a text answer — see `RunOptions.toolChoice`. */
+export type ToolChoice = "auto" | "required" | "none";
+
+/** One tool that actually ran, in order — the audit trail for a run and the resumable state on its errors. */
+export interface ToolInvocation {
+  name: string;
+  input: unknown;
+  output: unknown;
+  /** Set when the tool failed; `output` then holds the message the model was shown. */
+  error?: string;
+  durationMs: number;
+}
+
 /** The outcome of running a tool, handed back to the model. Objects are JSON-encoded for the wire. */
 export interface ToolResult {
   id: string;
@@ -66,6 +86,21 @@ interface BaseRequest {
    * like one service account.
    */
   headers?: Record<string, string>;
+  /**
+   * How hard the model should think. Sent on the wire only when set (an endpoint that doesn't know the
+   * field must never see it) — `"none"` is the big lever for calls that don't need it: classification,
+   * reformatting, anything where thinking only burns tokens and latency. Precedence when resolved through
+   * a model alias: per-call > alias > `defaults`.
+   */
+  reasoningEffort?: ReasoningEffort;
+  /**
+   * Merged flat into the wire body, last: `{ ...coax's own fields, ...endpoint.extraBody, ...this }` — it
+   * MAY override coax's own fields (`max_tokens`, `tools`, …). That is the point: an escape hatch that
+   * can't be overridden by anything isn't one. Use it for whatever the next gateway needs that coax
+   * doesn't have a first-class field for yet (e.g. `temperature`, `top_p`, `chat_template_kwargs`) —
+   * overriding a field coax itself relies on is your own risk.
+   */
+  extraBody?: Record<string, unknown>;
 }
 
 export interface StructuredRequest extends BaseRequest {
@@ -93,6 +128,9 @@ export interface ToolsRequest extends BaseRequest {
   system?: string;
   messages: Message[];
   tools: ToolDefinition[];
+  /** Already resolved to a plain value — `runTools` evaluates the step-indexed function form; a provider
+   *  never sees anything but "auto" | "required" | "none" | undefined. */
+  toolChoice?: ToolChoice;
 }
 
 /** Audio bytes going in (transcription). */

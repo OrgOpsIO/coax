@@ -6,8 +6,10 @@ import {
   emptyUsage,
   type Message,
   type Provider,
+  type ReasoningEffort,
   type SpeakRequest,
   type SpeakResponse,
+  type ToolInvocation,
   type ToolsRequest,
   type ToolsResponse,
   type TranscribeRequest,
@@ -22,6 +24,9 @@ export class CoaxSchemaError extends Error {
     readonly attempts: number,
     /** Usage summed across all attempts — the failed run still cost these tokens. */
     readonly usage: Usage = emptyUsage(),
+    /** The transcript up to the failure, including every repair reprompt — replayable, same idea as
+     *  `CoaxToolError.messages`. */
+    readonly messages: Message[] = [],
   ) {
     super(message);
     this.name = "CoaxSchemaError";
@@ -31,14 +36,20 @@ export class CoaxSchemaError extends Error {
 /**
  * Raised when a call is cancelled through its AbortSignal — the one error to check for "the user hung
  * up", regardless of which layer (SDK, repair loop, tool run) the abort landed in. `usage` carries what
- * the completed turns before the abort cost; the aborted call itself reports nothing.
+ * the completed turns before the abort cost; the aborted call itself reports nothing. `messages`/`calls`
+ * are populated by `runTools` so an aborted `ai.run()` is resumable exactly like a `CoaxToolError` —
+ * everywhere else (object/text/…) there is no transcript to carry, so they stay empty.
  */
 export class CoaxAbortError extends Error {
   readonly usage: Usage;
-  constructor(usage?: Usage, cause?: unknown) {
+  readonly messages: Message[];
+  readonly calls: ToolInvocation[];
+  constructor(usage?: Usage, cause?: unknown, messages?: Message[], calls?: ToolInvocation[]) {
     super("coax: the call was aborted by its AbortSignal", cause === undefined ? undefined : { cause });
     this.name = "CoaxAbortError";
     this.usage = usage ?? emptyUsage();
+    this.messages = messages ?? [];
+    this.calls = calls ?? [];
   }
 }
 
@@ -82,6 +93,10 @@ export interface ObjectRequest<T> {
   headers?: Record<string, string>;
   /** Cancel the call (incl. repair rounds) — surfaces as CoaxAbortError. */
   signal?: AbortSignal;
+  /** How hard the model should think. Sent on the wire only when set. See `BaseRequest.reasoningEffort`. */
+  reasoningEffort?: ReasoningEffort;
+  /** Merged flat into the wire body, last — MAY override coax's own fields. See `BaseRequest.extraBody`. */
+  extraBody?: Record<string, unknown>;
 }
 
 export interface ObjectResult<T> {
@@ -124,7 +139,17 @@ export interface Client {
   /** Typed, validated, self-repairing structured output. */
   object<T>(req: ObjectRequest<T>): Promise<ObjectResult<T>>;
   /** Free-form text (HTML, prose, reasoning) — no schema. */
-  text(req: { system?: string; prompt?: string; messages?: Message[]; maxTokens?: number; cache?: boolean; headers?: Record<string, string>; signal?: AbortSignal }): Promise<TextResult>;
+  text(req: {
+    system?: string;
+    prompt?: string;
+    messages?: Message[];
+    maxTokens?: number;
+    cache?: boolean;
+    headers?: Record<string, string>;
+    signal?: AbortSignal;
+    reasoningEffort?: ReasoningEffort;
+    extraBody?: Record<string, unknown>;
+  }): Promise<TextResult>;
   /** One native tool-calling turn. `ai.run()` drives the loop over this. */
   tools(req: ToolsRequest): Promise<ToolsResponse>;
   /** Speech-to-text. Throws CoaxUnsupportedError where the endpoint has no transcription. */
@@ -173,6 +198,8 @@ export function createClient(opts: ClientOptions): Client {
             cacheSystem: req.cache,
             headers: req.headers,
             signal: req.signal,
+            reasoningEffort: req.reasoningEffort,
+            extraBody: req.extraBody,
           }),
         );
         usage = addUsage(usage, res.usage);
@@ -191,7 +218,7 @@ export function createClient(opts: ClientOptions): Client {
         });
       }
 
-      throw new CoaxSchemaError(`coax: could not produce a valid "${schemaName}" after ${maxRepairs + 1} attempt(s)`, lastError, maxRepairs + 1, usage);
+      throw new CoaxSchemaError(`coax: could not produce a valid "${schemaName}" after ${maxRepairs + 1} attempt(s)`, lastError, maxRepairs + 1, usage, messages);
     },
 
     async text(req): Promise<TextResult> {
@@ -203,6 +230,8 @@ export function createClient(opts: ClientOptions): Client {
           cacheSystem: req.cache,
           headers: req.headers,
           signal: req.signal,
+          reasoningEffort: req.reasoningEffort,
+          extraBody: req.extraBody,
         }),
       );
       await onUsage?.(res.usage, res.model);

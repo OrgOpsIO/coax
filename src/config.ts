@@ -1,4 +1,4 @@
-import type { Provider, Usage } from "./types";
+import type { Provider, ReasoningEffort, Usage } from "./types";
 
 /**
  * A provider endpoint coax talks to with one of its built-in wire adapters. Name it whatever you like
@@ -16,6 +16,13 @@ export interface ProviderEndpoint {
   /** Model used for `ai.transcribe()` / `ai.speak()` where the endpoint names them separately from chat. */
   transcribeModel?: string;
   speakModel?: string;
+  /**
+   * Merged flat into every request body this endpoint sends, under the per-call `extraBody` (which wins).
+   * The place for an endpoint-wide quirk — e.g. Qwen's recommended `temperature`/`top_p`, or a gateway's
+   * `chat_template_kwargs` — that every call through this endpoint should carry without repeating it
+   * everywhere. See `BaseRequest.extraBody` for the merge order and the override caveat.
+   */
+  extraBody?: Record<string, unknown>;
 }
 
 /**
@@ -26,8 +33,14 @@ export interface ProviderEndpoint {
  */
 export type ProviderConfig = string | ProviderEndpoint | ((model: string) => Provider);
 
-/** A model alias resolves to `"provider:model"`, optionally with a fallback model on failure. */
-export type ModelConfig = string | { use: string; fallback?: string };
+/**
+ * A model alias resolves to `"provider:model"`, optionally with a fallback model on failure and a
+ * `reasoningEffort` that applies to every call through this alias. The setting rides on the alias
+ * rather than the provider so two aliases pointing at the same model can still think differently —
+ * one config line instead of touching every call site (e.g. a "classification" alias with `"none"`
+ * next to a "synthesis" alias with `"high"`, both on the same underlying model).
+ */
+export type ModelConfig = string | { use: string; fallback?: string; reasoningEffort?: ReasoningEffort };
 
 export interface RetryConfig {
   /** Total attempts on transient errors (429/5xx/network). Default 3. */
@@ -43,8 +56,12 @@ export interface CallDefaults {
   retries?: RetryConfig;
   /** Cache the system prompt by default (Anthropic cache_control; no-op on OpenAI). */
   cache?: boolean;
-  /** Cap on model turns in `ai.run()`. Default 8. */
-  maxSteps?: number;
+  /** Cap on model turns in `ai.run()`. Default 8; `null` = unlimited (needs `budget` or `signal` — see
+   *  `RunOptions.maxSteps`). */
+  maxSteps?: number | null;
+  /** Default reasoning effort for calls that don't set one directly or through their model alias.
+   *  Precedence: per-call > alias > here. */
+  reasoningEffort?: ReasoningEffort;
 }
 
 /** Metadata passed to observability hooks for every underlying model call. */

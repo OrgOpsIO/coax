@@ -205,4 +205,118 @@ describe("runTools", () => {
     expect(err.usage.inputTokens).toBe(10); // the one completed turn
     expect(callTools.seen).toHaveLength(1); // no further model call was started
   });
+
+  it("CoaxAbortError carries the transcript and completed tool calls so the run is resumable", async () => {
+    const ac = new AbortController();
+    const hangUp = tool({
+      name: "lookup_invoice",
+      description: "Fetch one invoice by number.",
+      input: z.object({ number: z.string() }),
+      run: () => {
+        ac.abort();
+        return { total: 42.5 };
+      },
+    });
+    const callTools = fakeTools([{ calls: [{ id: "c1", name: "lookup_invoice", input: { number: "R-1" } }] }]);
+    const err: CoaxAbortError = await runTools(callTools, { messages: [{ role: "user", content: "?" }], tools: [hangUp], signal: ac.signal }).catch((e) => e);
+    expect(err.calls).toHaveLength(1);
+    expect(err.calls[0]).toMatchObject({ name: "lookup_invoice", output: { total: 42.5 } });
+    expect(err.messages.at(-1)).toMatchObject({ role: "user", toolResults: [{ id: "c1" }] });
+  });
+
+  it("wraps a provider failure in CoaxToolError, carrying the original as cause and the partial state", async () => {
+    const boom = new Error("502 Bad Gateway");
+    let calls = 0;
+    const callTools = async () => {
+      calls++;
+      if (calls === 1) return { text: "", calls: [{ id: "c1", name: "lookup_invoice", input: { number: "R-1" } }], usage: { ...emptyUsage(), inputTokens: 10, outputTokens: 4 }, model: "mock-1" };
+      throw boom;
+    };
+    const err: CoaxToolError = await runTools(callTools, { messages: [{ role: "user", content: "?" }], tools: [lookup] }).catch((e) => e);
+    expect(err).toBeInstanceOf(CoaxToolError);
+    expect(err.cause).toBe(boom);
+    expect(err.message).toContain("502 Bad Gateway");
+    expect(err.usage.inputTokens).toBe(10); // the one completed turn before the 502
+    expect(err.steps).toBe(1);
+    expect(err.calls).toHaveLength(1);
+    expect(err.messages.at(-1)).toMatchObject({ role: "user", toolResults: [{ id: "c1" }] });
+  });
+
+  it("resolves the step-indexed toolChoice function and hands the provider only the plain value", async () => {
+    const seen: (string | undefined)[] = [];
+    const callTools = async (req: { messages: Message[]; tools: ToolDefinition[]; toolChoice?: string }) => {
+      seen.push(req.toolChoice);
+      if (seen.length === 1) return { text: "", calls: [{ id: "c1", name: "lookup_invoice", input: { number: "R-1" } }], usage: emptyUsage(), model: "mock-1" };
+      return { text: "done", calls: [], usage: emptyUsage(), model: "mock-1" };
+    };
+    await runTools(callTools, {
+      messages: [{ role: "user", content: "?" }],
+      tools: [lookup],
+      toolChoice: (step) => (step === 0 ? "required" : "auto"),
+    });
+    expect(seen).toEqual(["required", "auto"]);
+  });
+
+  it("passes a constant toolChoice through unchanged on every step", async () => {
+    const seen: (string | undefined)[] = [];
+    const callTools = async (req: { toolChoice?: string }) => {
+      seen.push(req.toolChoice);
+      return { text: "done", calls: [], usage: emptyUsage(), model: "mock-1" };
+    };
+    await runTools(callTools, { messages: [{ role: "user", content: "?" }], tools: [lookup], toolChoice: "none" });
+    expect(seen).toEqual(["none"]);
+  });
+
+  it("leaves toolChoice undefined when the caller never sets one", async () => {
+    const seen: (string | undefined)[] = [];
+    const callTools = async (req: { toolChoice?: string }) => {
+      seen.push(req.toolChoice);
+      return { text: "done", calls: [], usage: emptyUsage(), model: "mock-1" };
+    };
+    await runTools(callTools, { messages: [{ role: "user", content: "?" }], tools: [lookup] });
+    expect(seen).toEqual([undefined]);
+  });
+
+  describe("maxSteps: null (unlimited)", () => {
+    it("throws immediately when neither a budget nor a signal brakes it", async () => {
+      const callTools = fakeTools([{ text: "done" }]);
+      await expect(
+        runTools(callTools, { messages: [{ role: "user", content: "?" }], tools: [lookup], maxSteps: null }),
+      ).rejects.toThrow(/needs a budget or a signal/);
+      expect(callTools.seen).toHaveLength(0); // fails fast, before ever calling the model
+    });
+
+    it("runs unbounded with a budget, and stops once it is exhausted", async () => {
+      const callTools = fakeTools([{ calls: [{ id: "c1", name: "lookup_invoice", input: { number: "R-1" } }] }]);
+      const budget = createBudget(20); // 14 tokens/turn → exhausted before turn 3
+      const err: CoaxToolError = await runTools(callTools, {
+        messages: [{ role: "user", content: "?" }],
+        tools: [lookup],
+        maxSteps: null,
+        budget,
+      }).catch((e) => e);
+      expect(err).toBeInstanceOf(CoaxToolError);
+      expect(err.message).toMatch(/budget exhausted/);
+      expect(err.steps).toBe(2); // stopped before starting a third turn — no artificial step ceiling applied
+    });
+
+    it("runs unbounded with only a signal, and stops once it aborts", async () => {
+      const ac = new AbortController();
+      const callTools = fakeTools([{ calls: [{ id: "c1", name: "lookup_invoice", input: { number: "R-1" } }] }]);
+      let seen = 0;
+      const countingCallTools = async (req: Parameters<typeof callTools>[0]) => {
+        seen++;
+        if (seen === 5) ac.abort();
+        return callTools(req);
+      };
+      const err: CoaxAbortError = await runTools(countingCallTools, {
+        messages: [{ role: "user", content: "?" }],
+        tools: [lookup],
+        maxSteps: null,
+        signal: ac.signal,
+      }).catch((e) => e);
+      expect(err).toBeInstanceOf(CoaxAbortError);
+      expect(seen).toBe(5); // ran well past any bounded default before the signal stopped it
+    });
+  });
 });

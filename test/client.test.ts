@@ -117,6 +117,17 @@ describe("createClient().object — failure accounting & abort", () => {
     expect(err.usage.outputTokens).toBe(15);
   });
 
+  it("CoaxSchemaError carries the transcript, including every repair reprompt", async () => {
+    const provider = mockProvider([{ bad: 1 }, { bad: 2 }, { bad: 3 }]);
+    const client = createClient({ provider });
+    const err: CoaxSchemaError = await client.object({ schema: Field, prompt: "start here", maxRepairs: 2 }).catch((e) => e);
+    expect(err.messages[0]).toMatchObject({ role: "user", content: "start here" });
+    // maxRepairs: 2 → 3 attempts total, all invalid → 3 (assistant reply + reprompt) pairs appended
+    // after the initial user turn.
+    expect(err.messages).toHaveLength(7);
+    expect(err.messages.filter((m) => m.role === "user" && m.content.includes("did not match"))).toHaveLength(3);
+  });
+
   it("an already-aborted signal fails fast with CoaxAbortError, without calling the provider", async () => {
     const provider = mockProvider([{ label: "x", helpText: "y" }]);
     const client = createClient({ provider });

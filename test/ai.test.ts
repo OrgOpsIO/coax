@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { createAI } from "../src/ai";
 import { CoaxAbortError } from "../src/client";
-import { tool } from "../src/tools";
+import { tool, CoaxToolError } from "../src/tools";
+import { createBudget } from "../src/budget";
 import { parsePrompt, renderTemplate } from "../src/prompt-file";
 import { emptyUsage, type Provider } from "../src/types";
 
@@ -108,6 +109,63 @@ describe("createAI", () => {
   });
 });
 
+// A provider that just records what reasoningEffort/extraBody it was called with.
+function capturingProvider() {
+  const seen: { reasoningEffort?: string; extraBody?: Record<string, unknown> }[] = [];
+  const provider: Provider = {
+    name: "mock",
+    model: "m",
+    async structured(req) {
+      seen.push({ reasoningEffort: req.reasoningEffort, extraBody: req.extraBody });
+      return { raw: { answer: "ok" }, text: '{"answer":"ok"}', usage: emptyUsage(), model: "m" };
+    },
+    async text(req) {
+      seen.push({ reasoningEffort: req.reasoningEffort, extraBody: req.extraBody });
+      return { raw: "ok", text: "ok", usage: emptyUsage(), model: "m" };
+    },
+  };
+  return { provider, seen };
+}
+
+describe("createAI() — reasoningEffort precedence", () => {
+  it("resolves as per-call > alias > defaults", async () => {
+    const { provider, seen } = capturingProvider();
+    const ai = createAI({
+      providers: { mock: () => provider },
+      models: { withEffort: { use: "mock:m", reasoningEffort: "low" } },
+      defaults: { reasoningEffort: "high" },
+    });
+    await ai.object({ model: "withEffort", schema: Out, prompt: "?" });
+    await ai.object({ model: "withEffort", schema: Out, prompt: "?", reasoningEffort: "none" });
+    expect(seen[0]!.reasoningEffort).toBe("low"); // alias beats defaults
+    expect(seen[1]!.reasoningEffort).toBe("none"); // per-call beats the alias
+  });
+
+  it("falls back to defaults.reasoningEffort when neither the call nor the alias set one", async () => {
+    const { provider, seen } = capturingProvider();
+    const ai = createAI({ providers: { mock: () => provider }, models: { plain: "mock:m" }, defaults: { reasoningEffort: "high" } });
+    await ai.object({ model: "plain", schema: Out, prompt: "?" });
+    expect(seen[0]!.reasoningEffort).toBe("high");
+  });
+
+  it("applies the same precedence to text()", async () => {
+    const { provider, seen } = capturingProvider();
+    const ai = createAI({
+      providers: { mock: () => provider },
+      models: { withEffort: { use: "mock:m", reasoningEffort: "low" } },
+    });
+    await ai.text({ model: "withEffort", prompt: "?" });
+    expect(seen[0]!.reasoningEffort).toBe("low");
+  });
+
+  it("passes extraBody through untouched, per call", async () => {
+    const { provider, seen } = capturingProvider();
+    const ai = createAI({ providers: { mock: () => provider }, models: { plain: "mock:m" } });
+    await ai.object({ model: "plain", schema: Out, prompt: "?", extraBody: { temperature: 0.3 } });
+    expect(seen[0]!.extraBody).toEqual({ temperature: 0.3 });
+  });
+});
+
 describe("createAI().run", () => {
   // The backend-for-frontend shape: the model asks for data, the tool fetches it with credentials the
   // model never sees, and the caller's identity rides along on the request headers.
@@ -159,6 +217,64 @@ describe("createAI().run", () => {
     await expect(
       ai.run({ model: "a", prompt: "?", tools: [tool({ name: "x", description: "x", input: z.object({}), run: () => 1 })] }),
     ).rejects.toThrow(/does not support tool calling/);
+  });
+
+  it("resolves a step-indexed toolChoice function and hands the provider only the plain value", async () => {
+    const seen: (string | undefined)[] = [];
+    const turns = [{ text: "", calls: [{ id: "c1", name: "x", input: {} }] }, { text: "done", calls: [] }];
+    let turn = 0;
+    const provider: Provider = {
+      name: "mock",
+      model: "m",
+      structured: async () => ({ raw: {}, text: "{}", usage: emptyUsage(), model: "m" }),
+      text: async () => ({ raw: "", text: "", usage: emptyUsage(), model: "m" }),
+      async tools(req) {
+        seen.push(req.toolChoice);
+        return { ...turns[turn++]!, usage: emptyUsage(), model: "m" };
+      },
+    };
+    const ai = createAI({ providers: { mock: () => provider } });
+    await ai.run({
+      model: "mock:m",
+      prompt: "?",
+      tools: [tool({ name: "x", description: "x", input: z.object({}), run: () => "ok" })],
+      toolChoice: (step) => (step === 0 ? "required" : "auto"),
+    });
+    expect(seen).toEqual(["required", "auto"]);
+  });
+
+  it("maxSteps: null throws immediately without a budget or a signal", async () => {
+    const { factory } = scripted({ m: [] });
+    const ai = createAI({ providers: { mock: factory }, models: { a: "mock:m" } });
+    await expect(
+      ai.run({ model: "a", prompt: "?", tools: [], maxSteps: null }),
+    ).rejects.toThrow(/needs a budget or a signal/);
+  });
+
+  it("maxSteps: null runs unbounded with a budget, and dies as a CoaxToolError once it's exhausted", async () => {
+    let step = 0;
+    const provider: Provider = {
+      name: "mock",
+      model: "m",
+      structured: async () => ({ raw: {}, text: "{}", usage: emptyUsage(), model: "m" }),
+      text: async () => ({ raw: "", text: "", usage: emptyUsage(), model: "m" }),
+      async tools() {
+        step++;
+        return { text: "", calls: [{ id: `c${step}`, name: "x", input: {} }], usage: { ...emptyUsage(), inputTokens: 10, outputTokens: 4 }, model: "m" };
+      },
+    };
+    const ai = createAI({ providers: { mock: () => provider } });
+    const err: CoaxToolError = await ai
+      .run({
+        model: "mock:m",
+        prompt: "?",
+        tools: [tool({ name: "x", description: "x", input: z.object({}), run: () => "ok" })],
+        maxSteps: null,
+        budget: createBudget(20), // 14 tokens/turn → exhausted before turn 3
+      })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(CoaxToolError);
+    expect(err.steps).toBe(2); // no artificial step ceiling — the budget alone decided when to stop
   });
 });
 
