@@ -19,6 +19,8 @@ export interface ObjectCall<T> {
   maxRepairs?: number;
   /** Cache the system prompt (Anthropic cache_control; no-op on OpenAI). */
   cache?: boolean;
+  /** Mark the conversation-so-far as reusable for the loop's next call. See `BaseRequest.cacheConversation`. */
+  cacheConversation?: boolean;
   /** Extra HTTP headers — e.g. forwarding the end user's token so the gateway authorizes per user. */
   headers?: Record<string, string>;
   /** Cancel the call from outside (e.g. the BFF request died) — surfaces as CoaxAbortError. */
@@ -38,6 +40,8 @@ export interface TextCall {
   messages?: Message[];
   maxTokens?: number;
   cache?: boolean;
+  /** Mark the conversation-so-far as reusable for the loop's next call. See `BaseRequest.cacheConversation`. */
+  cacheConversation?: boolean;
   headers?: Record<string, string>;
   signal?: AbortSignal;
   purpose?: string;
@@ -105,6 +109,8 @@ export interface RunCall<C = unknown> extends Omit<RunOptions<C>, "tools"> {
   tools: Tool<any, C>[];
   maxTokens?: number;
   cache?: boolean;
+  /** Mark the transcript-so-far as reusable each turn — prior turns of the run read from cache. See `BaseRequest.cacheConversation`. */
+  cacheConversation?: boolean;
   headers?: Record<string, string>;
   purpose?: string;
   /** How hard the model should think. Precedence: here > the model alias > `defaults.reasoningEffort`. */
@@ -216,6 +222,7 @@ export function createAI(config: AIConfig): AI {
           maxTokens: call.maxTokens ?? d.maxTokens,
           maxRepairs: call.maxRepairs ?? d.maxRepairs,
           cache: call.cache ?? d.cache,
+          cacheConversation: call.cacheConversation,
           headers: call.headers,
           signal: call.signal,
           reasoningEffort: reasoningEffortFor(call.reasoningEffort, callSettings),
@@ -232,6 +239,7 @@ export function createAI(config: AIConfig): AI {
           messages: call.messages,
           maxTokens: call.maxTokens ?? d.maxTokens,
           cache: call.cache ?? d.cache,
+          cacheConversation: call.cacheConversation,
           headers: call.headers,
           signal: call.signal,
           reasoningEffort: reasoningEffortFor(call.reasoningEffort, callSettings),
@@ -270,6 +278,7 @@ export function createAI(config: AIConfig): AI {
               toolChoice: req.toolChoice,
               maxTokens: call.maxTokens ?? d.maxTokens,
               cacheSystem: call.cache ?? d.cache,
+              cacheConversation: call.cacheConversation,
               headers: call.headers,
               signal: call.signal,
               reasoningEffort: reasoningEffortFor(call.reasoningEffort, callSettings),

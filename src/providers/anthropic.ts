@@ -86,7 +86,23 @@ function toContent(m: Message): unknown {
   return blocks;
 }
 
-const toMessages = (messages: Message[]) => messages.map((m) => ({ role: m.role, content: toContent(m) }));
+// A conversation cache hint becomes a breakpoint on the LAST block of the LAST message: everything
+// before it (system → all prior turns) is stored as one reusable prefix, so a loop's next call — which
+// re-sends the grown transcript with its own breakpoint further down — reads the earlier turns from
+// cache. Marking only the newest message keeps exactly one breakpoint per request by construction.
+function markLastBlock(content: unknown): unknown {
+  const blocks: unknown[] = typeof content === "string" ? [{ type: "text", text: content }] : [...(content as unknown[])];
+  const i = blocks.length - 1;
+  if (i >= 0) blocks[i] = { ...(blocks[i] as object), cache_control: { type: "ephemeral" } };
+  return blocks;
+}
+
+const toMessages = (messages: Message[], cacheConversation?: boolean) =>
+  messages.map((m, i) => {
+    const content = toContent(m);
+    const mark = cacheConversation && i === messages.length - 1 && content !== "";
+    return { role: m.role, content: mark ? markLastBlock(content) : content };
+  });
 
 // A cached system prompt is sent as a content block carrying cache_control; Anthropic then reuses the
 // prefix across calls that share it (a big saving on a fan-out with a stable system prompt).
@@ -177,7 +193,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
             ...systemParam(req.system, req.cacheSystem),
             tools: [{ name: req.schemaName, description: `Return a ${req.schemaName} object.`, input_schema: req.jsonSchema }],
             tool_choice: { type: "tool", name: req.schemaName },
-            messages: toMessages(req.messages),
+            messages: toMessages(req.messages, req.cacheConversation),
             ...thinkingParam(req.reasoningEffort, maxTokens),
           },
           opts.extraBody,
@@ -200,7 +216,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
             model: opts.model,
             max_tokens: maxTokens,
             ...systemParam(req.system, req.cacheSystem),
-            messages: toMessages(req.messages),
+            messages: toMessages(req.messages, req.cacheConversation),
             ...thinkingParam(req.reasoningEffort, maxTokens),
           },
           opts.extraBody,
@@ -232,7 +248,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
             max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
             ...systemParam(req.system, req.cacheSystem),
             tools: req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.jsonSchema })),
-            messages: toMessages(req.messages),
+            messages: toMessages(req.messages, req.cacheConversation),
             ...toolChoiceParam(req.toolChoice),
           },
           opts.extraBody,
