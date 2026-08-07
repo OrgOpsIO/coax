@@ -42,6 +42,26 @@ describe("runLoop", () => {
     expect(seen).toEqual(["weather"]);
   });
 
+  it("passes cacheConversation through to every object call", async () => {
+    const calls: { cacheConversation?: boolean }[] = [];
+    const steps = fakeObject([
+      { action: "fetch", query: "weather" },
+      { action: "answer", text: "sunny" },
+    ]);
+    const object = async (call: { cacheConversation?: boolean }) => {
+      calls.push(call);
+      return steps();
+    };
+    await runLoop<StepT, string>(object as never, {
+      schema: Step,
+      messages: [{ role: "user", content: "?" }],
+      cacheConversation: true,
+      onStep: async (step) => (step.action === "answer" ? { done: true, value: step.text } : { done: false, reply: "r" }),
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls.every((c) => c.cacheConversation === true)).toBe(true);
+  });
+
   it("doom guard: throws when the same step repeats", async () => {
     const object = fakeObject([{ action: "fetch", query: "x" }]); // always the same
     await expect(
