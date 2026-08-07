@@ -39,6 +39,79 @@ function captureOpenai(message: unknown) {
   return { client, sent };
 }
 
+describe("conversation cache hints (anthropic)", () => {
+  const EPHEMERAL = { type: "ephemeral" };
+
+  it("marks the last block of the last message, wrapping string content into a text block", async () => {
+    const { client, sent } = captureAnthropic([{ type: "text", text: "ok" }]);
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    await provider.text({
+      messages: [
+        { role: "user", content: "turn 1" },
+        { role: "assistant", content: "reply" },
+        { role: "user", content: "turn 2" },
+      ],
+      cacheConversation: true,
+    });
+    const messages = sent[0]!.body.messages as { content: unknown }[];
+    expect(messages[0]!.content).toBe("turn 1");
+    expect(messages[1]!.content).toBe("reply");
+    expect(messages[2]!.content).toEqual([{ type: "text", text: "turn 2", cache_control: EPHEMERAL }]);
+  });
+
+  it("marks the last block when the last message already carries blocks (tool results)", async () => {
+    const { client, sent } = captureAnthropic([{ type: "text", text: "ok" }]);
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    await provider.tools!({
+      messages: [
+        { role: "user", content: "?" },
+        { role: "assistant", content: "", toolCalls: [{ id: "tu_1", name: "lookup", input: {} }] },
+        { role: "user", content: "", toolResults: [{ id: "tu_1", name: "lookup", output: "42" }] },
+      ],
+      tools: TOOLS,
+      cacheConversation: true,
+    });
+    const messages = sent[0]!.body.messages as { content: Record<string, unknown>[] }[];
+    const lastBlocks = messages[2]!.content;
+    expect(lastBlocks[lastBlocks.length - 1]!.cache_control).toEqual(EPHEMERAL);
+    // Exactly one breakpoint in the whole request — only the newest message is marked.
+    const breakpoints = messages.flatMap((m) => (Array.isArray(m.content) ? m.content : [])).filter((b) => (b as Record<string, unknown>).cache_control);
+    expect(breakpoints).toHaveLength(1);
+  });
+
+  it("applies to structured calls too, and combines with a cached system prompt", async () => {
+    const { client, sent } = captureAnthropic([{ type: "tool_use", input: { a: 1 } }]);
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    await provider.structured({
+      system: "stable rules",
+      messages: [{ role: "user", content: "extract" }],
+      jsonSchema: { type: "object" },
+      schemaName: "output",
+      cacheSystem: true,
+      cacheConversation: true,
+    });
+    expect(sent[0]!.body.system).toEqual([{ type: "text", text: "stable rules", cache_control: EPHEMERAL }]);
+    const messages = sent[0]!.body.messages as { content: unknown }[];
+    expect(messages[0]!.content).toEqual([{ type: "text", text: "extract", cache_control: EPHEMERAL }]);
+  });
+
+  it("leaves messages untouched without the hint, and skips an empty-string last message", async () => {
+    const { client, sent } = captureAnthropic([{ type: "text", text: "ok" }]);
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    await provider.text({ messages: [{ role: "user", content: "plain" }] });
+    await provider.text({ messages: [{ role: "user", content: "" }], cacheConversation: true });
+    expect((sent[0]!.body.messages as { content: unknown }[])[0]!.content).toBe("plain");
+    expect((sent[1]!.body.messages as { content: unknown }[])[0]!.content).toBe("");
+  });
+
+  it("is a no-op on the OpenAI wire (no cache_control ever reaches the body)", async () => {
+    const { client, sent } = captureOpenai({ content: "ok" });
+    const provider = openai({ model: "gpt-x", client: client as never });
+    await provider.text({ messages: [{ role: "user", content: "turn" }], cacheConversation: true });
+    expect(JSON.stringify(sent[0]!.body)).not.toContain("cache_control");
+  });
+});
+
 describe("provider tool mapping", () => {
   it("anthropic: reads tool_use blocks and replays calls + results as content blocks", async () => {
     const { client, sent } = captureAnthropic([

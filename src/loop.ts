@@ -12,6 +12,8 @@ export interface LoopOptions<T, R> {
   schemaName?: string;
   system?: string;
   cache?: boolean;
+  /** Mark the transcript-so-far as reusable each turn — the next turn reads prior turns from cache. See `BaseRequest.cacheConversation`. */
+  cacheConversation?: boolean;
   /** Initial conversation — must include the first user turn. */
   messages: Message[];
   /** Hard cap on turns. Default 8. */
@@ -47,7 +49,7 @@ export class CoaxLoopError extends Error {
   }
 }
 
-type ObjectFn = <T>(call: { model?: string; schema: ZodType<T>; schemaName?: string; system?: string; cache?: boolean; messages: Message[]; signal?: AbortSignal; purpose?: string }) => Promise<ObjectResult<T>>;
+type ObjectFn = <T>(call: { model?: string; schema: ZodType<T>; schemaName?: string; system?: string; cache?: boolean; cacheConversation?: boolean; messages: Message[]; signal?: AbortSignal; purpose?: string }) => Promise<ObjectResult<T>>;
 
 /** The agent-loop driver behind `ai.loop`. Kept separate so it is testable with a fake `object` fn. */
 export async function runLoop<T, R>(object: ObjectFn, opts: LoopOptions<T, R>): Promise<R> {
@@ -66,7 +68,7 @@ export async function runLoop<T, R>(object: ObjectFn, opts: LoopOptions<T, R>): 
     try {
       ({ data, usage: turnUsage } = await object<T>({
         model: opts.model, schema: opts.schema, schemaName: opts.schemaName,
-        system: opts.system, cache: opts.cache, messages, signal: opts.signal, purpose: opts.purpose,
+        system: opts.system, cache: opts.cache, cacheConversation: opts.cacheConversation, messages, signal: opts.signal, purpose: opts.purpose,
       }));
     } catch (err) {
       // An abort mid-call carries only that call's usage — add what this loop spent before it.

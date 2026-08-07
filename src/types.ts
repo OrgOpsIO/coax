@@ -80,6 +80,13 @@ interface BaseRequest {
    *  automatic (OpenAI). */
   cacheSystem?: boolean;
   /**
+   * Mark the conversation-so-far as reusable, so the NEXT call of a loop reads all prior turns from
+   * cache — the textbook win for multi-turn agentic / validate→repair loops that re-send the whole
+   * transcript every turn. Provider-native where supported (Anthropic: a cache breakpoint on the last
+   * message); a no-op where caching is automatic (OpenAI).
+   */
+  cacheConversation?: boolean;
+  /**
    * Extra HTTP headers for this one call, merged over the provider's configured headers. This is how
    * a caller's identity reaches a gateway that authorizes per user (e.g. forwarding the end user's
    * bearer token so the policy engine behind the endpoint decides) instead of every request looking

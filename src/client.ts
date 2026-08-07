@@ -89,6 +89,8 @@ export interface ObjectRequest<T> {
   maxRepairs?: number;
   /** Cache the system prompt at the provider (Anthropic cache_control; no-op on OpenAI). */
   cache?: boolean;
+  /** Mark the conversation-so-far as reusable for the loop's next call. See `BaseRequest.cacheConversation`. */
+  cacheConversation?: boolean;
   /** Extra HTTP headers for this call (e.g. forwarding the end user's identity to a gateway). */
   headers?: Record<string, string>;
   /** Cancel the call (incl. repair rounds) — surfaces as CoaxAbortError. */
@@ -145,6 +147,7 @@ export interface Client {
     messages?: Message[];
     maxTokens?: number;
     cache?: boolean;
+    cacheConversation?: boolean;
     headers?: Record<string, string>;
     signal?: AbortSignal;
     reasoningEffort?: ReasoningEffort;
@@ -196,6 +199,7 @@ export function createClient(opts: ClientOptions): Client {
             schemaName,
             maxTokens: req.maxTokens,
             cacheSystem: req.cache,
+            cacheConversation: req.cacheConversation,
             headers: req.headers,
             signal: req.signal,
             reasoningEffort: req.reasoningEffort,
@@ -228,6 +232,7 @@ export function createClient(opts: ClientOptions): Client {
           messages: toMessages(req.prompt, req.messages),
           maxTokens: req.maxTokens,
           cacheSystem: req.cache,
+          cacheConversation: req.cacheConversation,
           headers: req.headers,
           signal: req.signal,
           reasoningEffort: req.reasoningEffort,

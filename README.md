@@ -256,6 +256,8 @@ try {
   turns, and the abort surfaces as `CoaxAbortError` (never retried, never sent to the fallback).
 - **Prompt caching** — `cache: true` caches the system prompt at the provider (Anthropic `cache_control`;
   a no-op where caching is automatic). Big savings across a fan-out that shares a stable system prompt.
+  `cacheConversation: true` marks the conversation-so-far as reusable, so a loop's next turn reads all
+  prior turns from cache instead of re-billing the whole transcript.
 - **Tools** — `ai.run()` hands the model typed tools and runs the whole call/validate/reply loop.
 - **Agent loops** — `ai.loop()` drives a typed multi-turn loop with a built-in doom guard + token budget.
 - **Token budget** — `createBudget(limit)` caps the total spend of a loop, a run, or a fan-out.
@@ -394,6 +396,18 @@ if (!pass) await regenerate(rationale);
 await ai.object({ model: "fast", schema, system: bigStableSystemPrompt, prompt, cache: true });
 // …the same system prompt across a fan-out is billed once at the cache rate.
 ```
+
+A multi-turn loop re-sends the whole transcript every turn; `cacheConversation: true` marks the
+conversation-so-far as reusable, so the *next* call bills prior turns at the cache-read rate:
+
+```ts
+await ai.run({ model: "smart", messages, tools, cacheConversation: true });
+// …turn N+1 reads turns 1…N from cache instead of paying full price for them again.
+```
+
+Both flags are provider-neutral: on Anthropic they place `cache_control` breakpoints (the two combine
+to at most two breakpoints per request); on endpoints where prefix caching is automatic (OpenAI)
+they're a no-op.
 
 ### Vision
 
