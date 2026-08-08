@@ -4,8 +4,11 @@ import { formatIssues, safeParse, toProviderSchema } from "./schema";
 import {
   addUsage,
   emptyUsage,
+  type EmbedRequest,
+  type EmbedResponse,
   type Message,
   type Provider,
+  type ProviderResponse,
   type ReasoningEffort,
   type SpeakRequest,
   type SpeakResponse,
@@ -140,6 +143,14 @@ export interface Client {
   readonly provider: Provider;
   /** Typed, validated, self-repairing structured output. */
   object<T>(req: ObjectRequest<T>): Promise<ObjectResult<T>>;
+  /**
+   * Structured output as a stream of PARTIAL objects: each yield is the current parse of the JSON
+   * generated so far (unvalidated snapshots — only the final result is schema-checked). Repair rounds
+   * stream too: a failed attempt's reprompt restarts the partials. Returns the validated ObjectResult.
+   */
+  streamObject<T>(req: ObjectRequest<T>): AsyncGenerator<unknown, ObjectResult<T>, void>;
+  /** Embeddings — one vector per input. Throws CoaxUnsupportedError where the endpoint has none. */
+  embed(req: EmbedRequest): Promise<EmbedResponse>;
   /** Free-form text (HTML, prose, reasoning) — no schema. */
   text(req: {
     system?: string;
@@ -188,7 +199,7 @@ export function createClient(opts: ClientOptions): Client {
   const { provider, onUsage } = opts;
 
   /** Resolve an optional provider capability, or fail with a message that names the missing piece. */
-  function capability<K extends "tools" | "transcribe" | "speak">(key: K, label: string): NonNullable<Provider[K]> {
+  function capability<K extends "tools" | "transcribe" | "speak" | "embed">(key: K, label: string): NonNullable<Provider[K]> {
     const fn = provider[key];
     if (!fn) throw new CoaxUnsupportedError(label, provider.name);
     return fn.bind(provider) as NonNullable<Provider[K]>;
@@ -258,6 +269,95 @@ export function createClient(opts: ClientOptions): Client {
       );
       await onUsage?.(res.usage, res.model);
       return { text: res.text, usage: res.usage, model: res.model };
+    },
+
+    async *streamObject<T>(req: ObjectRequest<T>): AsyncGenerator<unknown, ObjectResult<T>, void> {
+      const schemaName = req.schemaName ?? "output";
+      const { jsonSchema, unwrap } = toProviderSchema(req.schema);
+      const maxRepairs = req.maxRepairs ?? opts.defaultMaxRepairs ?? 2;
+      const messages = toMessages(req.prompt, req.messages);
+
+      // The current parse of the JSON-so-far, or undefined while it doesn't parse yet. jsonrepair
+      // (inside extractJson) closes truncated structures, so partials appear early and often.
+      const partialValue = (acc: string): unknown => {
+        const v = extractJson(acc);
+        return typeof v === "string" ? undefined : v;
+      };
+
+      let usage = emptyUsage();
+      let model = provider.model;
+      let lastError = "";
+
+      for (let attempt = 0; attempt <= maxRepairs; attempt++) {
+        const wire = {
+          system: req.system,
+          messages,
+          jsonSchema,
+          schemaName,
+          maxTokens: req.maxTokens,
+          cacheSystem: req.cache,
+          cacheConversation: req.cacheConversation,
+          headers: req.headers,
+          signal: req.signal,
+          reasoningEffort: req.reasoningEffort,
+          extraBody: req.extraBody,
+        };
+
+        let res: ProviderResponse;
+        if (provider.structuredStream) {
+          const gen = provider.structuredStream(wire);
+          let acc = "";
+          let lastYield = "";
+          try {
+            if (req.signal?.aborted) throw new CoaxAbortError(usage);
+            let cur = await gen.next();
+            while (!cur.done) {
+              acc += cur.value;
+              const partial = partialValue(acc);
+              if (partial !== undefined) {
+                // Deduplicate — a delta that only extends a string value mid-token can parse identically.
+                const snapshot = JSON.stringify(partial);
+                if (snapshot !== lastYield) {
+                  lastYield = snapshot;
+                  yield unwrap(partial);
+                }
+              }
+              cur = await gen.next();
+            }
+            res = cur.value;
+          } catch (err) {
+            if (req.signal?.aborted && !(err instanceof CoaxAbortError)) throw new CoaxAbortError(usage, err);
+            throw err;
+          }
+        } else {
+          // No native structured streaming → one non-streaming call; the final object is the only partial.
+          res = await aborting(req.signal, () => usage, () => provider.structured(wire));
+          const whole = unwrap(extractJson(res.raw));
+          if (whole !== undefined) yield whole;
+        }
+
+        usage = addUsage(usage, res.usage);
+        model = res.model;
+        await onUsage?.(res.usage, res.model);
+
+        const parsed = safeParse(req.schema, unwrap(extractJson(res.raw)));
+        if (parsed.success) return { data: parsed.data, usage, model, repairs: attempt };
+
+        lastError = formatIssues(parsed.error);
+        messages.push({ role: "assistant", content: res.text || JSON.stringify(res.raw) });
+        messages.push({
+          role: "user",
+          content: `Your output did not match the required schema:\n${lastError}\n\nReturn a corrected result that matches the schema exactly.`,
+        });
+      }
+
+      throw new CoaxSchemaError(`coax: could not produce a valid "${schemaName}" after ${maxRepairs + 1} attempt(s)`, lastError, maxRepairs + 1, usage, messages);
+    },
+
+    async embed(req: EmbedRequest): Promise<EmbedResponse> {
+      const res = await aborting(req.signal, emptyUsage, () => capability("embed", "embeddings")(req));
+      await onUsage?.(res.usage, res.model);
+      return { embeddings: res.embeddings, usage: res.usage, model: res.model };
     },
 
     async *stream(req): AsyncGenerator<string, TextResult, void> {

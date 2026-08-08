@@ -231,6 +231,35 @@ export function anthropic(opts: AnthropicOptions): Provider {
       return { raw: text, text, usage: mapUsage(resp.usage), model: opts.model };
     },
 
+    async *structuredStream(req: StructuredRequest): AsyncGenerator<string, ProviderResponse, void> {
+      const c = await getClient();
+      const maxTokens = req.maxTokens ?? opts.maxTokens ?? 8192;
+      const s = c.messages.stream(
+        withExtraBody(
+          {
+            model: opts.model,
+            max_tokens: maxTokens,
+            ...systemParam(req.system, req.cacheSystem),
+            tools: [{ name: req.schemaName, description: `Return a ${req.schemaName} object.`, input_schema: req.jsonSchema }],
+            tool_choice: { type: "tool", name: req.schemaName },
+            messages: toMessages(req.messages, req.cacheConversation),
+            ...thinkingParam(req.reasoningEffort, maxTokens),
+          },
+          opts.extraBody,
+          req.extraBody,
+        ),
+        requestOptions(req.headers, req.signal),
+      );
+      // Forced tool use arrives as input_json_delta fragments — the raw JSON text of the output.
+      for await (const event of s as unknown as AsyncIterable<{ type: string; delta?: { type?: string; partial_json?: string } }>) {
+        if (event.type === "content_block_delta" && event.delta?.type === "input_json_delta" && event.delta.partial_json) yield event.delta.partial_json;
+      }
+      const final = await s.finalMessage();
+      const tool = final.content.find((b): b is { type: "tool_use"; input: unknown } => isBlock(b, "tool_use"));
+      const raw = tool?.input;
+      return { raw, text: raw === undefined ? "" : JSON.stringify(raw), usage: mapUsage(final.usage), model: opts.model };
+    },
+
     async *textStream(req: TextRequest): AsyncGenerator<string, ProviderResponse, void> {
       const c = await getClient();
       const maxTokens = req.maxTokens ?? opts.maxTokens ?? 8192;

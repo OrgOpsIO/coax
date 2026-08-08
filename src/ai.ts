@@ -1,6 +1,6 @@
 import { z, type ZodType } from "zod";
 import type { AIConfig } from "./config";
-import type { AudioFormat, AudioInput, Media, Message, Provider, ReasoningEffort, Usage } from "./types";
+import type { AudioFormat, AudioInput, EmbedResponse, Media, Message, Provider, ReasoningEffort, Usage } from "./types";
 import { CoaxAbortError, createClient, type ObjectResult, type SpeakResult, type TextResult, type TranscribeResult } from "./client";
 import { createRegistry, retrying, type CallSettings } from "./registry";
 import { parsePrompt, renderTemplate, type ParsedPrompt } from "./prompt-file";
@@ -76,6 +76,17 @@ export interface Judgement {
   rationale: string;
 }
 
+export interface EmbedCall {
+  model?: string;
+  /** One text or a batch — one vector per input, in order. */
+  input: string | string[];
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+  purpose?: string;
+  /** Merged flat into the wire body, last — same contract as `BaseRequest.extraBody`. */
+  extraBody?: Record<string, unknown>;
+}
+
 export interface TranscribeCall {
   model?: string;
   /** The audio bytes. A browser upload's Blob/File works directly. */
@@ -128,6 +139,49 @@ export interface TextStream {
   result: Promise<TextResult>;
 }
 
+/** Recursively optional — the honest type of an object still being generated. */
+export type DeepPartial<T> = T extends (infer U)[] ? DeepPartial<U>[] : T extends object ? { [K in keyof T]?: DeepPartial<T[K]> } : T;
+
+/** What `ai.streamObject()` opens: progressively completed partials, and the validated final result. */
+export interface ObjectStream<T> {
+  /** Snapshots of the object as it is generated — UNVALIDATED (only the final result is schema-checked).
+   *  A repair round restarts the snapshots from scratch. Iterate exactly once. */
+  partials: AsyncIterable<DeepPartial<T>>;
+  /** Resolves with the validated `ObjectResult` once `partials` has been fully consumed; rejects (e.g.
+   *  CoaxSchemaError after exhausted repairs) if the stream dies. */
+  result: Promise<ObjectResult<T>>;
+}
+
+/**
+ * Split an opened generator into a re-yielding stream and a promise of its return value. `opened.first`
+ * was already pulled by the caller (inside the fallback boundary); the result promise is pre-caught so
+ * a caller that only iterates the stream never sees an unhandled rejection — the same error already
+ * surfaces through the iteration.
+ */
+function split<Y, R>(opened: { gen: AsyncGenerator<Y, R, void>; first: IteratorResult<Y, R> }): { stream: AsyncIterable<Y>; result: Promise<R> } {
+  let resolveResult!: (r: R) => void;
+  let rejectResult!: (e: unknown) => void;
+  const result = new Promise<R>((res, rej) => {
+    resolveResult = res;
+    rejectResult = rej;
+  });
+  result.catch(() => {});
+  async function* pump(): AsyncGenerator<Y, void, void> {
+    try {
+      let cur = opened.first;
+      while (!cur.done) {
+        yield cur.value;
+        cur = await opened.gen.next();
+      }
+      resolveResult(cur.value);
+    } catch (err) {
+      rejectResult(err);
+      throw err;
+    }
+  }
+  return { stream: pump(), result };
+}
+
 export interface AI {
   /** Typed, validated, self-repairing structured output. */
   object<T>(call: ObjectCall<T>): Promise<ObjectResult<T>>;
@@ -140,6 +194,15 @@ export interface AI {
    * no fallback mid-stream, a later failure surfaces through the iteration and `result`.
    */
   stream(call: TextCall): Promise<TextStream>;
+  /**
+   * Structured output as a stream of partial objects — same call shape as `object()`. Each partial is
+   * the current parse of the JSON generated so far (unvalidated; the final `result` is validated and
+   * self-repairing exactly like `object()`, with repair rounds restarting the partials). Same
+   * opening/fallback semantics as `stream()`.
+   */
+  streamObject<T>(call: ObjectCall<T>): Promise<ObjectStream<T>>;
+  /** Embeddings — one vector per input, with the same alias/fallback/usage plumbing as every call. */
+  embed(call: EmbedCall): Promise<EmbedResponse>;
   /**
    * LLM-as-judge: score an output against a rubric. Returns a numeric score, a pass/fail against the
    * threshold, and a rationale. Use it to verify non-deterministic output that a schema can't catch —
@@ -284,31 +347,36 @@ export function createAI(config: AIConfig): AI {
         return { gen, first: await gen.next() };
       });
 
-      let resolveResult!: (r: TextResult) => void;
-      let rejectResult!: (e: unknown) => void;
-      const result = new Promise<TextResult>((res, rej) => {
-        resolveResult = res;
-        rejectResult = rej;
+      return split(opened);
+    },
+
+    async streamObject<T>(call: ObjectCall<T>): Promise<ObjectStream<T>> {
+      const opened = await withFallback(call.model, call.model, call.purpose ?? "streamObject", async (client, callSettings) => {
+        const gen = client.streamObject<T>({
+          schema: call.schema,
+          schemaName: call.schemaName,
+          system: call.system,
+          prompt: call.prompt,
+          messages: call.messages,
+          maxTokens: call.maxTokens ?? d.maxTokens,
+          maxRepairs: call.maxRepairs ?? d.maxRepairs,
+          cache: call.cache ?? d.cache,
+          cacheConversation: call.cacheConversation,
+          headers: call.headers,
+          signal: call.signal,
+          reasoningEffort: reasoningEffortFor(call.reasoningEffort, callSettings),
+          extraBody: call.extraBody,
+        });
+        return { gen, first: await gen.next() };
       });
-      // A caller may consume only the stream and never await `result` — that must not become an
-      // unhandled rejection; the same error already surfaces through the iteration.
-      result.catch(() => {});
+      const { stream, result } = split(opened);
+      return { partials: stream as AsyncIterable<DeepPartial<T>>, result };
+    },
 
-      async function* pump(): AsyncGenerator<string, void, void> {
-        try {
-          let cur = opened.first;
-          while (!cur.done) {
-            yield cur.value;
-            cur = await opened.gen.next();
-          }
-          resolveResult(cur.value);
-        } catch (err) {
-          rejectResult(err);
-          throw err;
-        }
-      }
-
-      return { stream: pump(), result };
+    async embed(call: EmbedCall): Promise<EmbedResponse> {
+      return withFallback(call.model, call.model, call.purpose ?? "embed", (client) =>
+        client.embed({ input: call.input, headers: call.headers, signal: call.signal, extraBody: call.extraBody }),
+      );
     },
 
     async judge(call: JudgeCall): Promise<Judgement> {

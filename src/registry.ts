@@ -34,6 +34,8 @@ export function retrying(provider: Provider, cfg?: RetryConfig): Provider {
     // A stream is never retried mid-flight (deltas already reached the consumer); failures before the
     // first delta are covered by the ai-layer fallback instead.
     ...(provider.textStream ? { textStream: (req: Parameters<NonNullable<Provider["textStream"]>>[0]) => provider.textStream!(req) } : {}),
+    ...(provider.structuredStream ? { structuredStream: (req: Parameters<NonNullable<Provider["structuredStream"]>>[0]) => provider.structuredStream!(req) } : {}),
+    ...(provider.embed ? { embed: (req: Parameters<NonNullable<Provider["embed"]>>[0]) => withRetry(() => provider.embed!(req), cfg, req.signal) } : {}),
     // Optional capabilities are forwarded only where the provider has them, so `capability is missing`
     // stays detectable through the wrapper.
     ...(provider.tools ? { tools: (req: Parameters<NonNullable<Provider["tools"]>>[0]) => withRetry(() => provider.tools!(req), cfg, req.signal) } : {}),
@@ -58,7 +60,7 @@ export function createRegistry(config: AIConfig) {
     const common = { model, apiKey: spec.apiKey, baseURL: spec.baseURL, headers: spec.headers, extraBody: spec.extraBody };
     return api === "anthropic"
       ? anthropic(common)
-      : openai({ ...common, transcribeModel: spec.transcribeModel, speakModel: spec.speakModel, tokenParam: spec.tokenParam, strict: spec.strict });
+      : openai({ ...common, transcribeModel: spec.transcribeModel, speakModel: spec.speakModel, embedModel: spec.embedModel, tokenParam: spec.tokenParam, strict: spec.strict });
   }
 
   function providerFor(providerName: string, model: string): Provider {

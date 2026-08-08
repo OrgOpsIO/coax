@@ -158,6 +158,22 @@ export interface AudioInput {
 
 export type AudioFormat = "mp3" | "opus" | "aac" | "flac" | "wav" | "pcm";
 
+export interface EmbedRequest {
+  /** One text or a batch — a batch comes back as one vector per input, in order. */
+  input: string | string[];
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+  /** Merged flat into the wire body, last — same contract as `BaseRequest.extraBody`. */
+  extraBody?: Record<string, unknown>;
+}
+
+export interface EmbedResponse {
+  /** One vector per input, in input order. */
+  embeddings: number[][];
+  usage: Usage;
+  model: string;
+}
+
 export interface TranscribeRequest {
   audio: AudioInput;
   /** ISO-639-1 hint, e.g. "de". Improves accuracy and latency when the language is known. */
@@ -233,6 +249,14 @@ export interface Provider {
    * non-streaming call whose whole text is yielded once — same contract, one big delta.
    */
   textStream?(req: TextRequest): AsyncGenerator<string, ProviderResponse, void>;
+  /**
+   * Structured-output streaming — backs `ai.streamObject()`. Yields RAW JSON text fragments of the
+   * output as they arrive (coax turns them into partial objects centrally), returns the final
+   * response when the stream ends. Optional: without it, coax degrades to one non-streaming call.
+   */
+  structuredStream?(req: StructuredRequest): AsyncGenerator<string, ProviderResponse, void>;
+  /** Embeddings — backs `ai.embed()`. Optional: an endpoint that has none raises a precise error. */
+  embed?(req: EmbedRequest): Promise<EmbedResponse>;
   /** Native tool calling — backs `ai.run()`. */
   tools?(req: ToolsRequest): Promise<ToolsResponse>;
   /** Speech-to-text — backs `ai.transcribe()`. */

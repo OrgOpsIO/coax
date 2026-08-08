@@ -16,6 +16,8 @@ export interface ProviderEndpoint {
   /** Model used for `ai.transcribe()` / `ai.speak()` where the endpoint names them separately from chat. */
   transcribeModel?: string;
   speakModel?: string;
+  /** Model for `ai.embed()` — embedding models are always named separately from chat (OpenAI wire). */
+  embedModel?: string;
   /**
    * Merged flat into every request body this endpoint sends, under the per-call `extraBody` (which wins).
    * The place for an endpoint-wide quirk — e.g. Qwen's recommended `temperature`/`top_p`, or a gateway's
