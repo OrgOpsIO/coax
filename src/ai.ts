@@ -101,7 +101,7 @@ export interface SpeakCall {
   purpose?: string;
 }
 
-export interface RunCall<C = unknown> extends Omit<RunOptions<C>, "tools"> {
+export interface RunCall<C = unknown, T = unknown> extends Omit<RunOptions<C, T>, "tools"> {
   model?: string;
   system?: string;
   prompt?: string;
@@ -149,9 +149,10 @@ export interface AI {
   /**
    * Tool-calling run: hand the model a set of tools and let it work until it answers. coax validates
    * every tool's arguments against its Zod schema, runs your handler, feeds the result back, and
-   * returns the final text plus the full transcript.
+   * returns the final text plus the full transcript. With an `output` schema, the run ends through a
+   * validated answer tool instead — the typed object lands on `RunResult.data`.
    */
-  run<C = unknown>(call: RunCall<C>): Promise<RunResult>;
+  run<C = unknown, T = unknown>(call: RunCall<C, T>): Promise<RunResult<T>>;
   /**
    * Agent loop: each turn returns a typed step (usually a discriminated union); your `onStep` handler
    * either finishes or feeds back the next user message. Built-in doom guard + optional token budget.
@@ -327,11 +328,11 @@ export function createAI(config: AIConfig): AI {
     },
 
     // `async` so a bad call rejects rather than throwing synchronously — same contract as every other method.
-    async run<C = unknown>(call: RunCall<C>): Promise<RunResult> {
+    async run<C = unknown, T = unknown>(call: RunCall<C, T>): Promise<RunResult<T>> {
       const messages = call.messages?.length ? call.messages : call.prompt != null ? [{ role: "user" as const, content: call.prompt }] : undefined;
       if (!messages) throw new Error("coax: provide either `prompt` or `messages`");
       return withFallback(call.model, call.model, call.purpose, (client, callSettings) =>
-        runTools<C>(
+        runTools<C, T>(
           (req) =>
             client.tools({
               system: call.system,
@@ -350,6 +351,7 @@ export function createAI(config: AIConfig): AI {
             messages,
             tools: call.tools,
             context: call.context,
+            output: call.output,
             // `call.maxSteps` may legitimately BE `null` (unlimited) — `??` would treat that as "not
             // set" and fall through to `d.maxSteps`, which is wrong; only `undefined` defers to defaults.
             maxSteps: call.maxSteps !== undefined ? call.maxSteps : d.maxSteps,

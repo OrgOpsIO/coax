@@ -25,6 +25,63 @@ const lookup = tool({
   run: ({ number }) => ({ number, total: 42.5 }),
 });
 
+describe("runTools with an output schema", () => {
+  const Answer = z.object({ total: z.number(), currency: z.string().min(1) });
+
+  it("ends the run through the answer tool and returns typed data", async () => {
+    const callTools = fakeTools([
+      { calls: [{ id: "c1", name: "lookup_invoice", input: { number: "R-1" } }] },
+      { calls: [{ id: "c2", name: "final_answer", input: { total: 42.5, currency: "EUR" } }] },
+    ]);
+    const result = await runTools(callTools, { messages: [{ role: "user", content: "?" }], tools: [lookup], output: Answer });
+    expect(result.data).toEqual({ total: 42.5, currency: "EUR" });
+    // The answer tool is offered to the model alongside the real tools.
+    expect(callTools.seen[0]!.tools.map((t) => t.name)).toEqual(["lookup_invoice", "final_answer"]);
+  });
+
+  it("feeds an answer that misses the schema back for correction", async () => {
+    const callTools = fakeTools([
+      { calls: [{ id: "c1", name: "final_answer", input: { total: "viel" } }] },
+      { calls: [{ id: "c2", name: "final_answer", input: { total: 42.5, currency: "EUR" } }] },
+    ]);
+    const result = await runTools(callTools, { messages: [{ role: "user", content: "?" }], tools: [lookup], output: Answer });
+    expect(result.data).toEqual({ total: 42.5, currency: "EUR" });
+    const feedback = callTools.seen[1]!.messages.at(-1)!;
+    expect(JSON.stringify(feedback.toolResults)).toMatch(/did not match the required schema/);
+  });
+
+  it("redirects a plain-text answer to the answer tool", async () => {
+    const callTools = fakeTools([
+      { text: "Die Rechnung beträgt 42,50 €." },
+      { calls: [{ id: "c1", name: "final_answer", input: { total: 42.5, currency: "EUR" } }] },
+    ]);
+    const result = await runTools(callTools, { messages: [{ role: "user", content: "?" }], tools: [lookup], output: Answer });
+    expect(result.data).toEqual({ total: 42.5, currency: "EUR" });
+    const nudge = callTools.seen[1]!.messages.at(-1)!;
+    expect(nudge.content).toMatch(/final_answer/);
+  });
+
+  it("wraps a non-object output schema transparently (same envelope as ai.object)", async () => {
+    const callTools = fakeTools([{ calls: [{ id: "c1", name: "final_answer", input: { value: ["a", "b"] } }] }]);
+    const result = await runTools(callTools, { messages: [{ role: "user", content: "?" }], tools: [], output: z.array(z.string()) });
+    expect(result.data).toEqual(["a", "b"]);
+  });
+
+  it("rejects a user tool that collides with the reserved answer-tool name", async () => {
+    const collider = tool({ name: "final_answer", description: "nope", input: z.object({}), run: () => "x" });
+    const callTools = fakeTools([{ text: "unused" }]);
+    await expect(runTools(callTools, { messages: [{ role: "user", content: "?" }], tools: [collider], output: Answer })).rejects.toThrow(/reserved/);
+  });
+
+  it("without an output schema nothing changes — no extra tool, text ends the run", async () => {
+    const callTools = fakeTools([{ text: "fertig" }]);
+    const result = await runTools(callTools, { messages: [{ role: "user", content: "?" }], tools: [lookup] });
+    expect(result.text).toBe("fertig");
+    expect(result.data).toBeUndefined();
+    expect(callTools.seen[0]!.tools.map((t) => t.name)).toEqual(["lookup_invoice"]);
+  });
+});
+
 describe("runTools", () => {
   it("runs a tool, feeds the result back, and returns the final answer", async () => {
     const callTools = fakeTools([

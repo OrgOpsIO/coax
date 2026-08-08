@@ -50,10 +50,21 @@ export function tool<I, C = unknown>(def: Tool<I, C>): Tool<I, C> {
   return def;
 }
 
-export interface RunOptions<C = unknown> {
+/** The reserved name of the tool that delivers a typed final answer — see `RunOptions.output`. */
+export const FINAL_TOOL = "final_answer";
+
+export interface RunOptions<C = unknown, T = unknown> {
   tools: Tool<any, C>[];
   /** Passed to every handler as `ctx.context`. */
   context?: C;
+  /**
+   * End the run with TYPED data instead of free text: coax hands the model one extra tool
+   * (`"final_answer"`) whose arguments must match this schema — validated like any tool input, so an
+   * answer that misses the schema goes back for correction, and a plain-text answer is redirected to
+   * the tool. The validated object lands on `RunResult.data`. A turn that delivers a valid final
+   * answer ends the run immediately; other tool calls in that same turn are not executed.
+   */
+  output?: ZodType<T>;
   /**
    * Hard cap on model turns (a turn = one model call + the tools it asked for). Default 8.
    * `null` = unlimited — but ONLY together with a real brake: `budget` or `signal`. `null` without
@@ -78,9 +89,11 @@ export interface RunOptions<C = unknown> {
   toolChoice?: ToolChoice | ((step: number) => ToolChoice);
 }
 
-export interface RunResult {
+export interface RunResult<T = unknown> {
   /** The model's final answer, once it stopped calling tools. */
   text: string;
+  /** The typed final answer — set when the run was given an `output` schema and delivered through it. */
+  data?: T;
   /** The full transcript, including tool calls and results — feed it back in to continue the conversation. */
   messages: Message[];
   /** Every tool that ran, in order. */
@@ -134,10 +147,10 @@ function resolveToolChoice(toolChoice: RunOptions["toolChoice"], step: number): 
  * validate-then-repair idea as structured output. Only exhausting `maxSteps` / the budget, or the
  * underlying model call itself failing, is fatal.
  */
-export async function runTools<C = unknown>(
+export async function runTools<C = unknown, T = unknown>(
   callTools: ToolsFn,
-  opts: RunOptions<C> & { messages: Message[] },
-): Promise<RunResult> {
+  opts: RunOptions<C, T> & { messages: Message[] },
+): Promise<RunResult<T>> {
   const messages = [...opts.messages];
   // `undefined` (never set) defaults to 8; `null` (set on purpose) means unlimited. `?? 8` alone can't
   // tell those apart — it would also replace an explicit `null` with 8.
@@ -151,6 +164,18 @@ export async function runTools<C = unknown>(
     description: t.description,
     jsonSchema: toProviderSchema(t.input).jsonSchema,
   }));
+
+  const output = opts.output ? toProviderSchema(opts.output) : undefined;
+  if (output) {
+    if (byName.has(FINAL_TOOL)) {
+      throw new Error(`coax: a tool may not be named "${FINAL_TOOL}" when \`output\` is set — that name is reserved for delivering the typed result`);
+    }
+    definitions.push({
+      name: FINAL_TOOL,
+      description: "Deliver your final answer. Call this exactly once, when you are done — the arguments ARE the answer and must match the schema.",
+      jsonSchema: output.jsonSchema,
+    });
+  }
 
   let usage = emptyUsage();
   let model = "";
@@ -176,8 +201,25 @@ export async function runTools<C = unknown>(
     model = res.model;
     opts.budget?.record(res.usage);
 
-    // No tool calls = the model is answering. Done.
-    if (!res.calls.length) return { text: res.text, messages, calls, steps: step + 1, usage, model };
+    // No tool calls = the model is answering. Done — unless a typed answer is required, in which case
+    // a free-text answer is redirected to the answer tool (the same feed-back-not-throw idea).
+    if (!res.calls.length) {
+      if (!output) return { text: res.text, messages, calls, steps: step + 1, usage, model };
+      messages.push({ role: "assistant", content: res.text });
+      messages.push({ role: "user", content: `Deliver your final answer by calling the "${FINAL_TOOL}" tool — its arguments are the answer.` });
+      continue;
+    }
+
+    // A valid final answer ends the run with typed data; an invalid one falls through and is answered
+    // with its exact schema misses below, like any other tool result.
+    const finalCall = output ? res.calls.find((c) => c.name === FINAL_TOOL) : undefined;
+    if (finalCall) {
+      const parsed = safeParse(opts.output!, output!.unwrap(finalCall.input));
+      if (parsed.success) {
+        messages.push({ role: "assistant", content: res.text, toolCalls: res.calls, ...(res.providerData !== undefined ? { providerData: res.providerData } : {}) });
+        return { text: res.text, data: parsed.data, messages, calls, steps: step + 1, usage, model };
+      }
+    }
 
     messages.push({ role: "assistant", content: res.text, toolCalls: res.calls, ...(res.providerData !== undefined ? { providerData: res.providerData } : {}) });
 
@@ -193,6 +235,13 @@ export async function runTools<C = unknown>(
           void opts.onToolCall?.(invocation);
           return { id: call.id, name: call.name, output, ...(error !== undefined ? { isError: true } : {}) };
         };
+
+        // Only reached when the final answer missed the schema — a valid one already ended the run.
+        if (output && call.name === FINAL_TOOL) {
+          const parsed = safeParse(opts.output!, output.unwrap(call.input));
+          const issues = parsed.success ? "" : formatIssues(parsed.error);
+          return record(`Your final answer did not match the required schema:\n${issues}\n\nCall "${FINAL_TOOL}" again with a corrected answer.`, issues);
+        }
 
         const t = byName.get(call.name);
         if (!t) {

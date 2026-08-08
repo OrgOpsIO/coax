@@ -8,7 +8,7 @@ export { parsePrompt, renderTemplate } from "./prompt-file";
 export type { ParsedPrompt, PromptMeta } from "./prompt-file";
 
 // Tools — definitions the model may call, and the driver behind ai.run().
-export { tool, runTools, CoaxToolError } from "./tools";
+export { tool, runTools, CoaxToolError, FINAL_TOOL } from "./tools";
 export type { Tool, ToolContext, ToolInvocation, RunOptions, RunResult } from "./tools";
 
 // Low-level primitives (single provider, no config layer).
