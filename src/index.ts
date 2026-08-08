@@ -2,7 +2,7 @@
 export { configure, ai, isConfigured, reset } from "./runtime";
 // Explicit instance (recommended for libraries, tests, multiple configs).
 export { createAI } from "./ai";
-export type { AI, ObjectCall, TextCall, TextStream, JudgeCall, Judgement, RunCall, TranscribeCall, SpeakCall } from "./ai";
+export type { AI, ObjectCall, TextCall, TextStream, ObjectStream, DeepPartial, JudgeCall, Judgement, RunCall, EmbedCall, TranscribeCall, SpeakCall } from "./ai";
 export type { AIConfig, ProviderConfig, ProviderEndpoint, ModelConfig, RetryConfig, CallDefaults, CallMeta } from "./config";
 export { parsePrompt, renderTemplate } from "./prompt-file";
 export type { ParsedPrompt, PromptMeta } from "./prompt-file";
@@ -35,6 +35,8 @@ export { addUsage, emptyUsage } from "./types";
 export type {
   AudioFormat,
   AudioInput,
+  EmbedRequest,
+  EmbedResponse,
   Media,
   Message,
   Provider,

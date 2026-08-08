@@ -2,6 +2,8 @@ import type OpenAiSdk from "openai";
 import {
   emptyUsage,
   type AudioFormat,
+  type EmbedRequest,
+  type EmbedResponse,
   type Message,
   type Provider,
   type ProviderResponse,
@@ -44,6 +46,8 @@ export interface OpenAiOptions {
    * `"max_tokens"` otherwise.
    */
   tokenParam?: "max_tokens" | "max_completion_tokens";
+  /** Model for `/embeddings` — embedding models are always named separately from chat. Required for `embed()`. */
+  embedModel?: string;
   /**
    * Set `strict: true` on the structured-output function definition, so OpenAI's constrained decoding
    * GUARANTEES the returned JSON matches the schema's shape — repair rounds then only ever fire for
@@ -63,6 +67,7 @@ type AnyClient = {
     transcriptions: { create(body: Record<string, unknown>, options?: RequestOptions): Promise<{ text: string; usage?: Record<string, unknown> }> };
     speech: { create(body: Record<string, unknown>, options?: RequestOptions): Promise<Response> };
   };
+  embeddings: { create(body: Record<string, unknown>, options?: RequestOptions): Promise<{ data: { embedding: number[] }[]; usage?: Record<string, unknown> }> };
 };
 
 function mapUsage(u: Record<string, unknown> | undefined): Usage {
@@ -224,6 +229,52 @@ export function openai(opts: OpenAiOptions): Provider {
       );
       const text = resp.choices[0]?.message?.content ?? "";
       return { raw: text, text, usage: mapUsage(resp.usage), model: opts.model };
+    },
+
+    async *structuredStream(req: StructuredRequest): AsyncGenerator<string, ProviderResponse, void> {
+      const c = await getClient();
+      const stream = (await c.chat.completions.create(
+        withExtraBody(
+          {
+            model: opts.model,
+            [tokenParam]: req.maxTokens ?? opts.maxTokens ?? 8192,
+            messages: toMessages(req.system, req.messages),
+            tools: [{ type: "function", function: { name: req.schemaName, description: `Return a ${req.schemaName} object.`, parameters: req.jsonSchema, ...(opts.strict ? { strict: true } : {}) } }],
+            tool_choice: { type: "function", function: { name: req.schemaName } },
+            ...(req.reasoningEffort ? { reasoning_effort: req.reasoningEffort } : {}),
+            stream: true,
+            stream_options: { include_usage: true },
+          },
+          opts.extraBody,
+          req.extraBody,
+        ),
+        requestOptions(req.headers, req.signal),
+      )) as unknown as AsyncIterable<{ choices?: { delta?: { tool_calls?: { function?: { arguments?: string } }[] } }[]; usage?: Record<string, unknown> }>;
+
+      let args = "";
+      let usage: Record<string, unknown> | undefined;
+      for await (const chunk of stream) {
+        const delta = chunk.choices?.[0]?.delta?.tool_calls?.[0]?.function?.arguments;
+        if (delta) {
+          args += delta;
+          yield delta;
+        }
+        if (chunk.usage) usage = chunk.usage;
+      }
+      return { raw: args, text: args, usage: mapUsage(usage), model: opts.model };
+    },
+
+    async embed(req: EmbedRequest): Promise<EmbedResponse> {
+      const model = opts.embedModel;
+      if (!model) {
+        throw new Error('coax: this endpoint has no embedModel configured — set it (e.g. embedModel: "text-embedding-3-small") to use embed().');
+      }
+      const c = await getClient();
+      const resp = await c.embeddings.create(
+        { model, input: req.input, ...req.extraBody },
+        requestOptions(req.headers, req.signal),
+      );
+      return { embeddings: resp.data.map((d) => d.embedding), usage: mapUsage(resp.usage), model };
     },
 
     async *textStream(req: TextRequest): AsyncGenerator<string, ProviderResponse, void> {
