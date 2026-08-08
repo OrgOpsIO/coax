@@ -39,6 +39,90 @@ function captureOpenai(message: unknown) {
   return { client, sent };
 }
 
+describe("anthropic thinking on the tools path", () => {
+  const THINKING = { type: "thinking", thinking: "hmm…", signature: "sig-abc" };
+
+  it("sends the thinking param and hands thinking blocks back as providerData", async () => {
+    const { client, sent } = captureAnthropic([THINKING, { type: "tool_use", id: "tu_1", name: "lookup", input: {} }]);
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    const res = await provider.tools!({
+      messages: [{ role: "user", content: "?" }],
+      tools: TOOLS,
+      reasoningEffort: "medium",
+    });
+    expect(sent[0]!.body.thinking).toEqual({ type: "enabled", budget_tokens: 8192 - 1024 });
+    expect(res.providerData).toEqual([THINKING]);
+    expect(res.calls).toEqual([{ id: "tu_1", name: "lookup", input: {} }]);
+  });
+
+  it("replays carried thinking blocks at the START of the assistant turn", async () => {
+    const { client, sent } = captureAnthropic([{ type: "text", text: "done" }]);
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    const messages: Message[] = [
+      { role: "user", content: "?" },
+      { role: "assistant", content: "", toolCalls: [{ id: "tu_1", name: "lookup", input: {} }], providerData: [THINKING] },
+      { role: "user", content: "", toolResults: [{ id: "tu_1", name: "lookup", output: "42" }] },
+    ];
+    await provider.tools!({ messages, tools: TOOLS, reasoningEffort: "low" });
+    const assistant = (sent[0]!.body.messages as { content: unknown[] }[])[1]!;
+    expect(assistant.content[0]).toEqual(THINKING);
+    expect((assistant.content[1] as { type: string }).type).toBe("tool_use");
+  });
+
+  it('rejects toolChoice "required" combined with thinking, before the wire', async () => {
+    const { client } = captureAnthropic([]);
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    await expect(
+      provider.tools!({ messages: [{ role: "user", content: "?" }], tools: TOOLS, reasoningEffort: "high", toolChoice: "required" }),
+    ).rejects.toThrow(/required.*thinking|thinking.*required/s);
+  });
+
+  it('reasoningEffort "none" still sends no thinking field', async () => {
+    const { client, sent } = captureAnthropic([{ type: "text", text: "ok" }]);
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    await provider.tools!({ messages: [{ role: "user", content: "?" }], tools: TOOLS, reasoningEffort: "none" });
+    expect(sent[0]!.body.thinking).toBeUndefined();
+  });
+});
+
+describe("openai token param & strict mode", () => {
+  it("vendor API (no baseURL): the cap goes out as max_completion_tokens", async () => {
+    const { client, sent } = captureOpenai({ content: "ok" });
+    const provider = openai({ model: "gpt-x", client: client as never });
+    await provider.text({ messages: [{ role: "user", content: "hi" }], maxTokens: 100 });
+    expect(sent[0]!.body.max_completion_tokens).toBe(100);
+    expect(sent[0]!.body.max_tokens).toBeUndefined();
+  });
+
+  it("compatible endpoint (baseURL set): the cap stays max_tokens", async () => {
+    const { client, sent } = captureOpenai({ content: "ok" });
+    const provider = openai({ model: "qwen", client: client as never, baseURL: "http://gateway.local/v1" });
+    await provider.text({ messages: [{ role: "user", content: "hi" }], maxTokens: 100 });
+    expect(sent[0]!.body.max_tokens).toBe(100);
+    expect(sent[0]!.body.max_completion_tokens).toBeUndefined();
+  });
+
+  it("tokenParam overrides the baseURL-derived default", async () => {
+    const { client, sent } = captureOpenai({ content: "ok" });
+    const provider = openai({ model: "gpt-x", client: client as never, baseURL: "http://proxy.local/v1", tokenParam: "max_completion_tokens" });
+    await provider.text({ messages: [{ role: "user", content: "hi" }], maxTokens: 50 });
+    expect(sent[0]!.body.max_completion_tokens).toBe(50);
+  });
+
+  it("strict: true lands on the structured function definition (and only there)", async () => {
+    const { client, sent } = captureOpenai({ tool_calls: [{ id: "1", function: { name: "output", arguments: "{}" } }] });
+    const provider = openai({ model: "gpt-x", client: client as never, strict: true });
+    await provider.structured({ messages: [{ role: "user", content: "go" }], jsonSchema: { type: "object" }, schemaName: "output" });
+    const fn = (sent[0]!.body.tools as { function: Record<string, unknown> }[])[0]!.function;
+    expect(fn.strict).toBe(true);
+
+    const plain = openai({ model: "gpt-x", client: client as never });
+    await plain.structured({ messages: [{ role: "user", content: "go" }], jsonSchema: { type: "object" }, schemaName: "output" });
+    const fn2 = (sent[1]!.body.tools as { function: Record<string, unknown> }[])[0]!.function;
+    expect(fn2.strict).toBeUndefined();
+  });
+});
+
 describe("conversation cache hints (anthropic)", () => {
   const EPHEMERAL = { type: "ephemeral" };
 
@@ -267,20 +351,6 @@ describe("reasoningEffort", () => {
     ).rejects.toThrow(/maxTokens >= 2048/);
   });
 
-  it("anthropic: reasoningEffort on the tools() path throws a clear error (v1 gap)", async () => {
-    const { client } = captureAnthropic([{ type: "text", text: "ok" }]);
-    const provider = anthropic({ model: "claude-x", client: client as never });
-    await expect(
-      provider.tools!({ messages: [{ role: "user", content: "?" }], tools: TOOLS, reasoningEffort: "low" }),
-    ).rejects.toThrow(/tools\(\) path/);
-  });
-
-  it("anthropic: reasoningEffort \"none\" is fine on the tools() path — nothing to round-trip", async () => {
-    const { client, sent } = captureAnthropic([{ type: "text", text: "ok" }]);
-    const provider = anthropic({ model: "claude-x", client: client as never });
-    await provider.tools!({ messages: [{ role: "user", content: "?" }], tools: TOOLS, reasoningEffort: "none" });
-    expect(sent[0]!.body).not.toHaveProperty("thinking");
-  });
 });
 
 describe("extraBody", () => {

@@ -179,7 +179,7 @@ export async function runTools<C = unknown>(
     // No tool calls = the model is answering. Done.
     if (!res.calls.length) return { text: res.text, messages, calls, steps: step + 1, usage, model };
 
-    messages.push({ role: "assistant", content: res.text, toolCalls: res.calls });
+    messages.push({ role: "assistant", content: res.text, toolCalls: res.calls, ...(res.providerData !== undefined ? { providerData: res.providerData } : {}) });
 
     // Independent calls in one turn run concurrently — the model asked for them together precisely
     // because they don't depend on each other.
