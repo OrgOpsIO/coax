@@ -226,6 +226,38 @@ export function openai(opts: OpenAiOptions): Provider {
       return { raw: text, text, usage: mapUsage(resp.usage), model: opts.model };
     },
 
+    async *textStream(req: TextRequest): AsyncGenerator<string, ProviderResponse, void> {
+      const c = await getClient();
+      const stream = (await c.chat.completions.create(
+        withExtraBody(
+          {
+            model: opts.model,
+            [tokenParam]: req.maxTokens ?? opts.maxTokens ?? 8192,
+            messages: toMessages(req.system, req.messages),
+            ...(req.reasoningEffort ? { reasoning_effort: req.reasoningEffort } : {}),
+            stream: true,
+            // Without this the stream's final chunk carries no usage — and every turn must be billable.
+            stream_options: { include_usage: true },
+          },
+          opts.extraBody,
+          req.extraBody,
+        ),
+        requestOptions(req.headers, req.signal),
+      )) as unknown as AsyncIterable<{ choices?: { delta?: { content?: string | null } }[]; usage?: Record<string, unknown> }>;
+
+      let text = "";
+      let usage: Record<string, unknown> | undefined;
+      for await (const chunk of stream) {
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (delta) {
+          text += delta;
+          yield delta;
+        }
+        if (chunk.usage) usage = chunk.usage;
+      }
+      return { raw: text, text, usage: mapUsage(usage), model: opts.model };
+    },
+
     async tools(req: ToolsRequest): Promise<ToolsResponse> {
       const c = await getClient();
       const resp = await c.chat.completions.create(

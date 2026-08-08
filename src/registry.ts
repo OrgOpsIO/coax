@@ -31,6 +31,9 @@ export function retrying(provider: Provider, cfg?: RetryConfig): Provider {
     model: provider.model,
     structured: (req) => withRetry(() => provider.structured(req), cfg, req.signal),
     text: (req) => withRetry(() => provider.text(req), cfg, req.signal),
+    // A stream is never retried mid-flight (deltas already reached the consumer); failures before the
+    // first delta are covered by the ai-layer fallback instead.
+    ...(provider.textStream ? { textStream: (req: Parameters<NonNullable<Provider["textStream"]>>[0]) => provider.textStream!(req) } : {}),
     // Optional capabilities are forwarded only where the provider has them, so `capability is missing`
     // stays detectable through the wrapper.
     ...(provider.tools ? { tools: (req: Parameters<NonNullable<Provider["tools"]>>[0]) => withRetry(() => provider.tools!(req), cfg, req.signal) } : {}),

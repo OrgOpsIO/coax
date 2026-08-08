@@ -119,11 +119,27 @@ export interface RunCall<C = unknown> extends Omit<RunOptions<C>, "tools"> {
   extraBody?: Record<string, unknown>;
 }
 
+/** What `ai.stream()` opens: the delta stream, and the final result once the stream is consumed. */
+export interface TextStream {
+  /** Text deltas in arrival order. Iterate exactly once. */
+  stream: AsyncIterable<string>;
+  /** Resolves with the final `TextResult` (full text + usage) once `stream` has been fully consumed;
+   *  rejects if the stream dies mid-flight. If you only want the final text, use `ai.text()`. */
+  result: Promise<TextResult>;
+}
+
 export interface AI {
   /** Typed, validated, self-repairing structured output. */
   object<T>(call: ObjectCall<T>): Promise<ObjectResult<T>>;
   /** Free-form text. */
   text(call: TextCall): Promise<TextResult>;
+  /**
+   * Token streaming for text — same call shape as `text()`. The returned promise resolves once the
+   * stream has STARTED (the first delta is in), so retryable failures and model fallback still apply
+   * to a primary that dies before producing anything; after the first delta the stream is committed —
+   * no fallback mid-stream, a later failure surfaces through the iteration and `result`.
+   */
+  stream(call: TextCall): Promise<TextStream>;
   /**
    * LLM-as-judge: score an output against a rubric. Returns a numeric score, a pass/fail against the
    * threshold, and a rationale. Use it to verify non-deterministic output that a schema can't catch —
@@ -246,6 +262,52 @@ export function createAI(config: AIConfig): AI {
           extraBody: call.extraBody,
         }),
       );
+    },
+
+    async stream(call: TextCall): Promise<TextStream> {
+      // Opening = create the generator AND pull the first item. Anything that fails up to there (a 401,
+      // an immediate 500, a model that can't even start) goes through withFallback like any other call.
+      const opened = await withFallback(call.model, call.model, call.purpose ?? "stream", async (client, callSettings) => {
+        const gen = client.stream({
+          system: call.system,
+          prompt: call.prompt,
+          messages: call.messages,
+          maxTokens: call.maxTokens ?? d.maxTokens,
+          cache: call.cache ?? d.cache,
+          cacheConversation: call.cacheConversation,
+          headers: call.headers,
+          signal: call.signal,
+          reasoningEffort: reasoningEffortFor(call.reasoningEffort, callSettings),
+          extraBody: call.extraBody,
+        });
+        return { gen, first: await gen.next() };
+      });
+
+      let resolveResult!: (r: TextResult) => void;
+      let rejectResult!: (e: unknown) => void;
+      const result = new Promise<TextResult>((res, rej) => {
+        resolveResult = res;
+        rejectResult = rej;
+      });
+      // A caller may consume only the stream and never await `result` — that must not become an
+      // unhandled rejection; the same error already surfaces through the iteration.
+      result.catch(() => {});
+
+      async function* pump(): AsyncGenerator<string, void, void> {
+        try {
+          let cur = opened.first;
+          while (!cur.done) {
+            yield cur.value;
+            cur = await opened.gen.next();
+          }
+          resolveResult(cur.value);
+        } catch (err) {
+          rejectResult(err);
+          throw err;
+        }
+      }
+
+      return { stream: pump(), result };
     },
 
     async judge(call: JudgeCall): Promise<Judgement> {

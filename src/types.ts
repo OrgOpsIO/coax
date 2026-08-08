@@ -227,6 +227,12 @@ export interface Provider {
   readonly model: string;
   structured(req: StructuredRequest): Promise<ProviderResponse>;
   text(req: TextRequest): Promise<ProviderResponse>;
+  /**
+   * Token streaming — backs `ai.stream()`. Yields text deltas as they arrive and returns the final
+   * response (usage and all) when the stream ends. Optional: without it, coax degrades to one
+   * non-streaming call whose whole text is yielded once — same contract, one big delta.
+   */
+  textStream?(req: TextRequest): AsyncGenerator<string, ProviderResponse, void>;
   /** Native tool calling — backs `ai.run()`. */
   tools?(req: ToolsRequest): Promise<ToolsResponse>;
   /** Speech-to-text — backs `ai.transcribe()`. */

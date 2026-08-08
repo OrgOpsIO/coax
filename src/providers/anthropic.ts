@@ -231,6 +231,33 @@ export function anthropic(opts: AnthropicOptions): Provider {
       return { raw: text, text, usage: mapUsage(resp.usage), model: opts.model };
     },
 
+    async *textStream(req: TextRequest): AsyncGenerator<string, ProviderResponse, void> {
+      const c = await getClient();
+      const maxTokens = req.maxTokens ?? opts.maxTokens ?? 8192;
+      const s = c.messages.stream(
+        withExtraBody(
+          {
+            model: opts.model,
+            max_tokens: maxTokens,
+            ...systemParam(req.system, req.cacheSystem),
+            messages: toMessages(req.messages, req.cacheConversation),
+            ...thinkingParam(req.reasoningEffort, maxTokens),
+          },
+          opts.extraBody,
+          req.extraBody,
+        ),
+        requestOptions(req.headers, req.signal),
+      );
+      // The SDK's MessageStream is itself async-iterable over raw events; text deltas are the ones we
+      // surface (thinking deltas stay internal — they are process, not answer).
+      for await (const event of s as unknown as AsyncIterable<{ type: string; delta?: { type?: string; text?: string } }>) {
+        if (event.type === "content_block_delta" && event.delta?.type === "text_delta" && event.delta.text) yield event.delta.text;
+      }
+      const final = await s.finalMessage();
+      const text = textOf(final.content);
+      return { raw: text, text, usage: mapUsage(final.usage), model: opts.model };
+    },
+
     async tools(req: ToolsRequest): Promise<ToolsResponse> {
       const thinking = Boolean(req.reasoningEffort && req.reasoningEffort !== "none");
       // Anthropic only allows tool_choice "auto"/"none" while thinking — forcing a tool ("required" →

@@ -153,6 +153,23 @@ export interface Client {
     reasoningEffort?: ReasoningEffort;
     extraBody?: Record<string, unknown>;
   }): Promise<TextResult>;
+  /**
+   * Token streaming: an async generator yielding text deltas, returning the final `TextResult` (usage
+   * and all) when the stream ends. Providers without `textStream` degrade to one non-streaming call
+   * whose whole text is yielded once. Abort surfaces as CoaxAbortError, mid-stream included.
+   */
+  stream(req: {
+    system?: string;
+    prompt?: string;
+    messages?: Message[];
+    maxTokens?: number;
+    cache?: boolean;
+    cacheConversation?: boolean;
+    headers?: Record<string, string>;
+    signal?: AbortSignal;
+    reasoningEffort?: ReasoningEffort;
+    extraBody?: Record<string, unknown>;
+  }): AsyncGenerator<string, TextResult, void>;
   /** One native tool-calling turn. `ai.run()` drives the loop over this. */
   tools(req: ToolsRequest): Promise<ToolsResponse>;
   /** Speech-to-text. Throws CoaxUnsupportedError where the endpoint has no transcription. */
@@ -241,6 +258,45 @@ export function createClient(opts: ClientOptions): Client {
       );
       await onUsage?.(res.usage, res.model);
       return { text: res.text, usage: res.usage, model: res.model };
+    },
+
+    async *stream(req): AsyncGenerator<string, TextResult, void> {
+      const wire = {
+        system: req.system,
+        messages: toMessages(req.prompt, req.messages),
+        maxTokens: req.maxTokens,
+        cacheSystem: req.cache,
+        cacheConversation: req.cacheConversation,
+        headers: req.headers,
+        signal: req.signal,
+        reasoningEffort: req.reasoningEffort,
+        extraBody: req.extraBody,
+      };
+
+      // No native streaming on this provider → one non-streaming call, its whole text as one delta.
+      if (!provider.textStream) {
+        const res = await aborting(req.signal, emptyUsage, () => provider.text(wire));
+        await onUsage?.(res.usage, res.model);
+        if (res.text) yield res.text;
+        return { text: res.text, usage: res.usage, model: res.model };
+      }
+
+      const gen = provider.textStream(wire);
+      try {
+        if (req.signal?.aborted) throw new CoaxAbortError();
+        let cur = await gen.next();
+        while (!cur.done) {
+          yield cur.value;
+          cur = await gen.next();
+        }
+        const res = cur.value;
+        await onUsage?.(res.usage, res.model);
+        return { text: res.text, usage: res.usage, model: res.model };
+      } catch (err) {
+        // Same normalization as `aborting()` — but around iteration, so a mid-stream abort lands here too.
+        if (req.signal?.aborted && !(err instanceof CoaxAbortError)) throw new CoaxAbortError(emptyUsage(), err);
+        throw err;
+      }
     },
 
     async tools(req: ToolsRequest): Promise<ToolsResponse> {
