@@ -37,6 +37,21 @@ export interface OpenAiOptions {
   speakModel?: string;
   /** Merged into every request body from this endpoint, under the per-call `extraBody`. See `ProviderEndpoint.extraBody`. */
   extraBody?: Record<string, unknown>;
+  /**
+   * Which wire field carries the output-token cap. OpenAI's own API wants `max_completion_tokens`
+   * (reasoning models reject the deprecated `max_tokens` outright); many compatible servers still only
+   * know `max_tokens`. Default: `"max_completion_tokens"` when no `baseURL` is set (the vendor API),
+   * `"max_tokens"` otherwise.
+   */
+  tokenParam?: "max_tokens" | "max_completion_tokens";
+  /**
+   * Set `strict: true` on the structured-output function definition, so OpenAI's constrained decoding
+   * GUARANTEES the returned JSON matches the schema's shape — repair rounds then only ever fire for
+   * what a grammar can't check (semantic refinements like `min(1)`). Opt-in because strict mode
+   * rejects schemas it can't express: optional fields must be unions with `null`, and every property
+   * must be required. Enable it when your schemas are strict-compatible.
+   */
+  strict?: boolean;
 }
 
 type ChatMessage = { content?: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[] };
@@ -144,6 +159,11 @@ const EXTENSIONS: Record<string, string> = {
 export function openai(opts: OpenAiOptions): Provider {
   let client: AnyClient | undefined = opts.client as AnyClient | undefined;
 
+  // Vendor API (no baseURL): `max_completion_tokens` — the only cap ALL current OpenAI models accept
+  // (reasoning models 400 on `max_tokens`). Compatible servers (vLLM, LM Studio, gateways): stay on
+  // `max_tokens`, which they all know. `tokenParam` overrides either way.
+  const tokenParam = opts.tokenParam ?? (opts.baseURL ? "max_tokens" : "max_completion_tokens");
+
   async function getClient(): Promise<AnyClient> {
     if (client) return client;
     const mod = await import("openai");
@@ -172,9 +192,9 @@ export function openai(opts: OpenAiOptions): Provider {
         withExtraBody(
           {
             model: opts.model,
-            max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
+            [tokenParam]: req.maxTokens ?? opts.maxTokens ?? 8192,
             messages: toMessages(req.system, req.messages),
-            tools: [{ type: "function", function: { name: req.schemaName, description: `Return a ${req.schemaName} object.`, parameters: req.jsonSchema } }],
+            tools: [{ type: "function", function: { name: req.schemaName, description: `Return a ${req.schemaName} object.`, parameters: req.jsonSchema, ...(opts.strict ? { strict: true } : {}) } }],
             tool_choice: { type: "function", function: { name: req.schemaName } },
             ...(req.reasoningEffort ? { reasoning_effort: req.reasoningEffort } : {}),
           },
@@ -193,7 +213,7 @@ export function openai(opts: OpenAiOptions): Provider {
         withExtraBody(
           {
             model: opts.model,
-            max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
+            [tokenParam]: req.maxTokens ?? opts.maxTokens ?? 8192,
             messages: toMessages(req.system, req.messages),
             ...(req.reasoningEffort ? { reasoning_effort: req.reasoningEffort } : {}),
           },
@@ -206,13 +226,45 @@ export function openai(opts: OpenAiOptions): Provider {
       return { raw: text, text, usage: mapUsage(resp.usage), model: opts.model };
     },
 
+    async *textStream(req: TextRequest): AsyncGenerator<string, ProviderResponse, void> {
+      const c = await getClient();
+      const stream = (await c.chat.completions.create(
+        withExtraBody(
+          {
+            model: opts.model,
+            [tokenParam]: req.maxTokens ?? opts.maxTokens ?? 8192,
+            messages: toMessages(req.system, req.messages),
+            ...(req.reasoningEffort ? { reasoning_effort: req.reasoningEffort } : {}),
+            stream: true,
+            // Without this the stream's final chunk carries no usage — and every turn must be billable.
+            stream_options: { include_usage: true },
+          },
+          opts.extraBody,
+          req.extraBody,
+        ),
+        requestOptions(req.headers, req.signal),
+      )) as unknown as AsyncIterable<{ choices?: { delta?: { content?: string | null } }[]; usage?: Record<string, unknown> }>;
+
+      let text = "";
+      let usage: Record<string, unknown> | undefined;
+      for await (const chunk of stream) {
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (delta) {
+          text += delta;
+          yield delta;
+        }
+        if (chunk.usage) usage = chunk.usage;
+      }
+      return { raw: text, text, usage: mapUsage(usage), model: opts.model };
+    },
+
     async tools(req: ToolsRequest): Promise<ToolsResponse> {
       const c = await getClient();
       const resp = await c.chat.completions.create(
         withExtraBody(
           {
             model: opts.model,
-            max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
+            [tokenParam]: req.maxTokens ?? opts.maxTokens ?? 8192,
             messages: toMessages(req.system, req.messages),
             tools: req.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.jsonSchema } })),
             // Literal values match the OpenAI wire directly; unset keeps today's hardcoded "auto".

@@ -58,7 +58,10 @@ const toolOutput = (output: unknown): string => (typeof output === "string" ? ou
 
 function toContent(m: Message): unknown {
   if (m.role === "assistant" && m.toolCalls?.length) {
-    const blocks: unknown[] = m.content ? [{ type: "text", text: m.content }] : [];
+    // Thinking blocks (carried opaquely as providerData) must lead the assistant turn — Anthropic
+    // rejects a tool_use turn whose thinking arrives after other blocks, and verifies the signature.
+    const blocks: unknown[] = Array.isArray(m.providerData) ? [...m.providerData] : [];
+    if (m.content) blocks.push({ type: "text", text: m.content });
     for (const c of m.toolCalls) blocks.push({ type: "tool_use", id: c.id, name: c.name, input: c.input ?? {} });
     return blocks;
   }
@@ -228,28 +231,57 @@ export function anthropic(opts: AnthropicOptions): Provider {
       return { raw: text, text, usage: mapUsage(resp.usage), model: opts.model };
     },
 
+    async *textStream(req: TextRequest): AsyncGenerator<string, ProviderResponse, void> {
+      const c = await getClient();
+      const maxTokens = req.maxTokens ?? opts.maxTokens ?? 8192;
+      const s = c.messages.stream(
+        withExtraBody(
+          {
+            model: opts.model,
+            max_tokens: maxTokens,
+            ...systemParam(req.system, req.cacheSystem),
+            messages: toMessages(req.messages, req.cacheConversation),
+            ...thinkingParam(req.reasoningEffort, maxTokens),
+          },
+          opts.extraBody,
+          req.extraBody,
+        ),
+        requestOptions(req.headers, req.signal),
+      );
+      // The SDK's MessageStream is itself async-iterable over raw events; text deltas are the ones we
+      // surface (thinking deltas stay internal — they are process, not answer).
+      for await (const event of s as unknown as AsyncIterable<{ type: string; delta?: { type?: string; text?: string } }>) {
+        if (event.type === "content_block_delta" && event.delta?.type === "text_delta" && event.delta.text) yield event.delta.text;
+      }
+      const final = await s.finalMessage();
+      const text = textOf(final.content);
+      return { raw: text, text, usage: mapUsage(final.usage), model: opts.model };
+    },
+
     async tools(req: ToolsRequest): Promise<ToolsResponse> {
-      // v1 gap, deliberate: a `thinking` block on a tool turn needs to round-trip back on the next
-      // request, and `Message.content` is a plain string (see types.ts) — there is nowhere to keep it.
-      // Fail clearly instead of silently dropping the setting (or the model's thinking).
-      if (req.reasoningEffort && req.reasoningEffort !== "none") {
+      const thinking = Boolean(req.reasoningEffort && req.reasoningEffort !== "none");
+      // Anthropic only allows tool_choice "auto"/"none" while thinking — forcing a tool ("required" →
+      // "any") is a 400 from the endpoint; make it a clear error here instead.
+      if (thinking && req.toolChoice === "required") {
         throw new Error(
-          `coax: reasoningEffort ("${req.reasoningEffort}") is not supported on the Anthropic tools() path yet — ` +
-            "thinking blocks would need to round-trip across tool turns, which coax's Message shape can't carry today. " +
-            'Drop reasoningEffort for this call (or leave it "none"), or run it on the OpenAI wire, where it works.',
+          'coax: toolChoice "required" cannot be combined with a reasoningEffort on Anthropic — ' +
+            'thinking only permits tool_choice "auto"/"none". Drop one of the two for this call (a step-indexed ' +
+            'toolChoice can force step 0 without thinking and re-enable it later).',
         );
       }
       const c = await getClient();
+      const maxTokens = req.maxTokens ?? opts.maxTokens ?? 8192;
       const resp = await createMessage(
         c,
         withExtraBody(
           {
             model: opts.model,
-            max_tokens: req.maxTokens ?? opts.maxTokens ?? 8192,
+            max_tokens: maxTokens,
             ...systemParam(req.system, req.cacheSystem),
             tools: req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.jsonSchema })),
             messages: toMessages(req.messages, req.cacheConversation),
             ...toolChoiceParam(req.toolChoice),
+            ...thinkingParam(req.reasoningEffort, maxTokens),
           },
           opts.extraBody,
           req.extraBody,
@@ -259,7 +291,17 @@ export function anthropic(opts: AnthropicOptions): Provider {
       const calls: ToolCall[] = resp.content
         .filter((b): b is { type: "tool_use"; id: string; name: string; input: unknown } => isBlock(b, "tool_use"))
         .map((b) => ({ id: b.id, name: b.name, input: b.input }));
-      return { text: textOf(resp.content), calls, usage: mapUsage(resp.usage), model: opts.model };
+      // Thinking blocks (incl. redacted ones) must be replayed verbatim — signature and all — at the
+      // START of this turn's assistant message on the next request. Hand them back opaquely; runTools
+      // stores them on the message, toContent puts them back in front.
+      const carried = resp.content.filter((b) => isBlock(b, "thinking") || isBlock(b, "redacted_thinking"));
+      return {
+        text: textOf(resp.content),
+        calls,
+        usage: mapUsage(resp.usage),
+        model: opts.model,
+        ...(carried.length ? { providerData: carried } : {}),
+      };
     },
   };
 }

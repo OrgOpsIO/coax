@@ -133,6 +133,12 @@ configure({
 });
 ```
 
+Two OpenAI-wire details are handled for you, overridable per endpoint: the output-token cap goes out as
+`max_completion_tokens` on the vendor API (reasoning models reject the deprecated `max_tokens`) and as
+`max_tokens` on compatible servers (`tokenParam` overrides). And `strict: true` opts a strict-compatible
+endpoint into grammar-guaranteed structured output — the schema's *shape* can then never miss, repair
+rounds only fire for what a grammar can't check (`min(1)`, formats, refinements).
+
 Both live side by side — switching a call from a frontier model to your own box is one word. Anything
 that speaks neither protocol still plugs in with a factory implementing the small `Provider` interface:
 
@@ -176,10 +182,14 @@ Sent on the wire only where set — an endpoint that has never heard of it never
 gets `reasoning_effort` with the literal value; Anthropic gets `thinking: { type: "enabled", budget_tokens }`
 (budget derived from the effort, capped below `max_tokens`), or no `thinking` field at all for `"none"`.
 
-One v1 gap: `reasoningEffort` on Anthropic's `tools()` path isn't supported yet — a `low`/`medium`/`high`
-effort there throws a clear error rather than silently doing nothing (thinking blocks would need to
-round-trip across tool turns, which is its own piece of work). `"none"` is fine there, since there is
-nothing to round-trip.
+On Anthropic tool runs, thinking blocks round-trip automatically: they ride opaquely on the assistant
+message (`Message.providerData`) and are replayed verbatim — signature intact — on the next turn, so
+`reasoningEffort` works on `ai.run()` too. Persist that field if you store transcripts. One combination
+is impossible by the provider's rules and fails clearly: `toolChoice: "required"` while thinking.
+
+On OpenAI, coax sends the effort literally (`reasoning_effort`); which values a given model accepts is
+the endpoint's business — older reasoning models know `low`–`high` but not `"none"`, non-reasoning
+models reject the field entirely.
 
 ### The `extraBody` escape hatch
 
@@ -258,7 +268,11 @@ try {
   a no-op where caching is automatic). Big savings across a fan-out that shares a stable system prompt.
   `cacheConversation: true` marks the conversation-so-far as reusable, so a loop's next turn reads all
   prior turns from cache instead of re-billing the whole transcript.
-- **Tools** — `ai.run()` hands the model typed tools and runs the whole call/validate/reply loop.
+- **Streaming** — `ai.stream()` yields text deltas as they arrive; `result` resolves with the full
+  text and usage once the stream is drained. Model fallback still covers a primary that dies before
+  its first token.
+- **Tools** — `ai.run()` hands the model typed tools and runs the whole call/validate/reply loop. With
+  an `output` schema the run ends through a validated answer tool: typed data on `result.data`.
 - **Agent loops** — `ai.loop()` drives a typed multi-turn loop with a built-in doom guard + token budget.
 - **Token budget** — `createBudget(limit)` caps the total spend of a loop, a run, or a fan-out.
 - **Usage** — one `onUsage(usage, meta)` hook across every call, plus summed `usage` on each result.
@@ -305,6 +319,20 @@ const { text, calls, usage } = await ai.run({
   budget: createBudget(50_000),
   onToolCall: (c) => log(c.name, c.durationMs),
 });
+```
+
+A run can also end in **typed data instead of prose**: pass `output` and the model delivers its final
+answer through one extra validated tool — schema misses go back for correction, exactly like structured
+output:
+
+```ts
+const { data } = await ai.run({
+  model: "smart",
+  prompt: "Wie hoch ist Rechnung R-2026-1, in welcher Währung?",
+  tools: [openInvoices],
+  output: z.object({ total: z.number(), currency: z.string() }),
+});
+data.total; // number — validated, not parsed out of prose
 ```
 
 Failures are **fed back, not thrown**: an invented tool name, arguments that miss the schema, or a handler
@@ -408,6 +436,22 @@ await ai.run({ model: "smart", messages, tools, cacheConversation: true });
 Both flags are provider-neutral: on Anthropic they place `cache_control` breakpoints (the two combine
 to at most two breakpoints per request); on endpoints where prefix caching is automatic (OpenAI)
 they're a no-op.
+
+### Streaming
+
+`ai.stream()` takes the same call as `ai.text()` and yields deltas as they arrive — the shape a BFF
+pipes straight into an SSE response:
+
+```ts
+const { stream, result } = await ai.stream({ model: "fast", prompt: question, signal: ac.signal });
+for await (const delta of stream) res.write(`data: ${JSON.stringify(delta)}\n\n`);
+const { text, usage } = await result;   // the full text + the bill, once the stream is drained
+```
+
+The returned promise resolves when the stream has **started** — so retries and model fallback still
+cover a primary that dies before producing anything. After the first delta the stream is committed:
+no fallback mid-stream (your user already saw those tokens), a later failure surfaces through the
+iteration and `result`. A custom provider without native streaming degrades to one big delta.
 
 ### Vision
 

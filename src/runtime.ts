@@ -48,6 +48,7 @@ function current(): AI {
 export const ai: AI = {
   object: async (call) => current().object(call),
   text: async (call) => current().text(call),
+  stream: async (call) => current().stream(call),
   judge: async (call) => current().judge(call),
   run: async (call) => current().run(call),
   loop: async (opts) => current().loop(opts),

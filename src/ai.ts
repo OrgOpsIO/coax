@@ -101,7 +101,7 @@ export interface SpeakCall {
   purpose?: string;
 }
 
-export interface RunCall<C = unknown> extends Omit<RunOptions<C>, "tools"> {
+export interface RunCall<C = unknown, T = unknown> extends Omit<RunOptions<C, T>, "tools"> {
   model?: string;
   system?: string;
   prompt?: string;
@@ -119,11 +119,27 @@ export interface RunCall<C = unknown> extends Omit<RunOptions<C>, "tools"> {
   extraBody?: Record<string, unknown>;
 }
 
+/** What `ai.stream()` opens: the delta stream, and the final result once the stream is consumed. */
+export interface TextStream {
+  /** Text deltas in arrival order. Iterate exactly once. */
+  stream: AsyncIterable<string>;
+  /** Resolves with the final `TextResult` (full text + usage) once `stream` has been fully consumed;
+   *  rejects if the stream dies mid-flight. If you only want the final text, use `ai.text()`. */
+  result: Promise<TextResult>;
+}
+
 export interface AI {
   /** Typed, validated, self-repairing structured output. */
   object<T>(call: ObjectCall<T>): Promise<ObjectResult<T>>;
   /** Free-form text. */
   text(call: TextCall): Promise<TextResult>;
+  /**
+   * Token streaming for text — same call shape as `text()`. The returned promise resolves once the
+   * stream has STARTED (the first delta is in), so retryable failures and model fallback still apply
+   * to a primary that dies before producing anything; after the first delta the stream is committed —
+   * no fallback mid-stream, a later failure surfaces through the iteration and `result`.
+   */
+  stream(call: TextCall): Promise<TextStream>;
   /**
    * LLM-as-judge: score an output against a rubric. Returns a numeric score, a pass/fail against the
    * threshold, and a rationale. Use it to verify non-deterministic output that a schema can't catch —
@@ -133,9 +149,10 @@ export interface AI {
   /**
    * Tool-calling run: hand the model a set of tools and let it work until it answers. coax validates
    * every tool's arguments against its Zod schema, runs your handler, feeds the result back, and
-   * returns the final text plus the full transcript.
+   * returns the final text plus the full transcript. With an `output` schema, the run ends through a
+   * validated answer tool instead — the typed object lands on `RunResult.data`.
    */
-  run<C = unknown>(call: RunCall<C>): Promise<RunResult>;
+  run<C = unknown, T = unknown>(call: RunCall<C, T>): Promise<RunResult<T>>;
   /**
    * Agent loop: each turn returns a typed step (usually a discriminated union); your `onStep` handler
    * either finishes or feeds back the next user message. Built-in doom guard + optional token budget.
@@ -248,6 +265,52 @@ export function createAI(config: AIConfig): AI {
       );
     },
 
+    async stream(call: TextCall): Promise<TextStream> {
+      // Opening = create the generator AND pull the first item. Anything that fails up to there (a 401,
+      // an immediate 500, a model that can't even start) goes through withFallback like any other call.
+      const opened = await withFallback(call.model, call.model, call.purpose ?? "stream", async (client, callSettings) => {
+        const gen = client.stream({
+          system: call.system,
+          prompt: call.prompt,
+          messages: call.messages,
+          maxTokens: call.maxTokens ?? d.maxTokens,
+          cache: call.cache ?? d.cache,
+          cacheConversation: call.cacheConversation,
+          headers: call.headers,
+          signal: call.signal,
+          reasoningEffort: reasoningEffortFor(call.reasoningEffort, callSettings),
+          extraBody: call.extraBody,
+        });
+        return { gen, first: await gen.next() };
+      });
+
+      let resolveResult!: (r: TextResult) => void;
+      let rejectResult!: (e: unknown) => void;
+      const result = new Promise<TextResult>((res, rej) => {
+        resolveResult = res;
+        rejectResult = rej;
+      });
+      // A caller may consume only the stream and never await `result` — that must not become an
+      // unhandled rejection; the same error already surfaces through the iteration.
+      result.catch(() => {});
+
+      async function* pump(): AsyncGenerator<string, void, void> {
+        try {
+          let cur = opened.first;
+          while (!cur.done) {
+            yield cur.value;
+            cur = await opened.gen.next();
+          }
+          resolveResult(cur.value);
+        } catch (err) {
+          rejectResult(err);
+          throw err;
+        }
+      }
+
+      return { stream: pump(), result };
+    },
+
     async judge(call: JudgeCall): Promise<Judgement> {
       const [min, max] = call.scale ?? [1, 5];
       const passScore = call.passScore ?? Math.ceil((min + max) / 2);
@@ -265,11 +328,11 @@ export function createAI(config: AIConfig): AI {
     },
 
     // `async` so a bad call rejects rather than throwing synchronously — same contract as every other method.
-    async run<C = unknown>(call: RunCall<C>): Promise<RunResult> {
+    async run<C = unknown, T = unknown>(call: RunCall<C, T>): Promise<RunResult<T>> {
       const messages = call.messages?.length ? call.messages : call.prompt != null ? [{ role: "user" as const, content: call.prompt }] : undefined;
       if (!messages) throw new Error("coax: provide either `prompt` or `messages`");
       return withFallback(call.model, call.model, call.purpose, (client, callSettings) =>
-        runTools<C>(
+        runTools<C, T>(
           (req) =>
             client.tools({
               system: call.system,
@@ -288,6 +351,7 @@ export function createAI(config: AIConfig): AI {
             messages,
             tools: call.tools,
             context: call.context,
+            output: call.output,
             // `call.maxSteps` may legitimately BE `null` (unlimited) — `??` would treat that as "not
             // set" and fall through to `d.maxSteps`, which is wrong; only `undefined` defers to defaults.
             maxSteps: call.maxSteps !== undefined ? call.maxSteps : d.maxSteps,

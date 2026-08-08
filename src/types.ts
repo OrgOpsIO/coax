@@ -54,6 +54,13 @@ export interface Message {
   media?: Media[];
   toolCalls?: ToolCall[];
   toolResults?: ToolResult[];
+  /**
+   * Opaque provider state that must round-trip with this assistant turn — e.g. reasoning/thinking
+   * blocks a provider requires to be replayed verbatim on the next request of a tool run. Set by the
+   * provider, carried untouched by coax, never inspected. Treat it as a black box: don't read it,
+   * don't fabricate it, and keep it on the message when persisting/replaying transcripts.
+   */
+  providerData?: unknown;
 }
 
 /** Token accounting, normalized across providers. */
@@ -191,6 +198,8 @@ export interface ToolsResponse {
   calls: ToolCall[];
   usage: Usage;
   model: string;
+  /** Opaque provider state to replay with this turn's assistant message — see `Message.providerData`. */
+  providerData?: unknown;
 }
 
 export interface TranscribeResponse {
@@ -218,6 +227,12 @@ export interface Provider {
   readonly model: string;
   structured(req: StructuredRequest): Promise<ProviderResponse>;
   text(req: TextRequest): Promise<ProviderResponse>;
+  /**
+   * Token streaming — backs `ai.stream()`. Yields text deltas as they arrive and returns the final
+   * response (usage and all) when the stream ends. Optional: without it, coax degrades to one
+   * non-streaming call whose whole text is yielded once — same contract, one big delta.
+   */
+  textStream?(req: TextRequest): AsyncGenerator<string, ProviderResponse, void>;
   /** Native tool calling — backs `ai.run()`. */
   tools?(req: ToolsRequest): Promise<ToolsResponse>;
   /** Speech-to-text — backs `ai.transcribe()`. */

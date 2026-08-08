@@ -23,6 +23,12 @@ export interface ProviderEndpoint {
    * everywhere. See `BaseRequest.extraBody` for the merge order and the override caveat.
    */
   extraBody?: Record<string, unknown>;
+  /** OpenAI wire only: which field carries the output-token cap. Default: `max_completion_tokens` on the
+   *  vendor API (no `baseURL`), `max_tokens` on compatible endpoints. See `OpenAiOptions.tokenParam`. */
+  tokenParam?: "max_tokens" | "max_completion_tokens";
+  /** OpenAI wire only: `strict: true` structured output — the schema shape is grammar-guaranteed by the
+   *  endpoint. Opt-in; needs strict-compatible schemas. See `OpenAiOptions.strict`. */
+  strict?: boolean;
 }
 
 /**
