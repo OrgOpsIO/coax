@@ -1,6 +1,6 @@
 {
   "name": "@orgops/coax",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Typed, provider-agnostic, self-repairing structured output from LLMs. Pure TypeScript — no native modules, no codegen, no vendor lock-in.",
   "type": "module",
   "license": "MIT",

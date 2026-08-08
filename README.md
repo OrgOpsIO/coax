@@ -268,9 +268,11 @@ try {
   a no-op where caching is automatic). Big savings across a fan-out that shares a stable system prompt.
   `cacheConversation: true` marks the conversation-so-far as reusable, so a loop's next turn reads all
   prior turns from cache instead of re-billing the whole transcript.
-- **Streaming** — `ai.stream()` yields text deltas as they arrive; `result` resolves with the full
-  text and usage once the stream is drained. Model fallback still covers a primary that dies before
-  its first token.
+- **Streaming** — `ai.stream()` yields text deltas as they arrive; `ai.streamObject()` yields partial
+  objects while the model writes, with `object()`'s validate→repair contract on the final result.
+  Model fallback still covers a primary that dies before its first token.
+- **Embeddings** — `ai.embed()` returns one vector per input, through the same alias/fallback/usage
+  plumbing as every other call (`embedModel` names the model per endpoint).
 - **Tools** — `ai.run()` hands the model typed tools and runs the whole call/validate/reply loop. With
   an `output` schema the run ends through a validated answer tool: typed data on `result.data`.
 - **Agent loops** — `ai.loop()` drives a typed multi-turn loop with a built-in doom guard + token budget.
@@ -453,6 +455,19 @@ cover a primary that dies before producing anything. After the first delta the s
 no fallback mid-stream (your user already saw those tokens), a later failure surfaces through the
 iteration and `result`. A custom provider without native streaming degrades to one big delta.
 
+Structured output streams too — `ai.streamObject()` yields **partial objects** while the model writes
+(a form filling itself in, a list growing row by row), with the exact `object()` contract on top:
+
+```ts
+const { partials, result } = await ai.streamObject({ model: "fast", schema: Offer, prompt });
+for await (const partial of partials) render(partial);   // DeepPartial<Offer> snapshots, growing
+const { data, repairs } = await result;                  // validated, self-repaired, typed
+```
+
+Partials are *unvalidated* snapshots (coax's aggressive parser closes the truncated JSON at every
+step); only `result` is schema-checked. A repair round streams as well — the partials restart, the
+consumer just keeps rendering.
+
 ### Vision
 
 ```ts
@@ -461,6 +476,23 @@ await ai.object({
   messages: [{ role: "user", content: "Extract the fields.", media: [{ kind: "image", mediaType: "image/png", dataBase64 }] }],
 });
 ```
+
+### Embeddings
+
+The RAG building block, on the OpenAI wire (vendor API or your own gateway/vLLM). Embedding models are
+always named separately from chat, so the endpoint declares one:
+
+```ts
+configure({
+  providers: { openai: { apiKey, embedModel: "text-embedding-3-small" } },
+  models: { vectors: "openai:text-embedding-3-small" },
+});
+
+const { embeddings } = await ai.embed({ model: "vectors", input: chunks });  // one vector per chunk, in order
+```
+
+An endpoint without `embedModel`, or a provider without the capability (Anthropic has no embeddings
+API), fails with a message that says exactly that — not a mystery 404.
 
 ## In a backend-for-frontend
 
