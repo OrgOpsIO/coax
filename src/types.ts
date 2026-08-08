@@ -259,6 +259,12 @@ export interface Provider {
   embed?(req: EmbedRequest): Promise<EmbedResponse>;
   /** Native tool calling — backs `ai.run()`. */
   tools?(req: ToolsRequest): Promise<ToolsResponse>;
+  /**
+   * One streaming tool-calling turn — backs `ai.runStream()`. Yields the turn's TEXT deltas as they
+   * arrive (tool-call arguments are not surfaced mid-flight) and returns the complete `ToolsResponse`
+   * when the turn ends. Optional: without it, a run streams nothing but still works turn by turn.
+   */
+  toolsStream?(req: ToolsRequest): AsyncGenerator<string, ToolsResponse, void>;
   /** Speech-to-text — backs `ai.transcribe()`. */
   transcribe?(req: TranscribeRequest): Promise<TranscribeResponse>;
   /** Text-to-speech — backs `ai.speak()`. */

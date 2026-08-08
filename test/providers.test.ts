@@ -85,6 +85,73 @@ describe("anthropic thinking on the tools path", () => {
   });
 });
 
+describe("provider toolsStream", () => {
+  it("openai: yields text deltas and assembles fragmented tool calls by index", async () => {
+    const chunks = [
+      { choices: [{ delta: { content: "Ich " } }] },
+      { choices: [{ delta: { content: "suche…", tool_calls: [{ index: 0, id: "c1", function: { name: "lookup", arguments: '{"q":' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '"x"}' } }] } }] },
+      { choices: [], usage: { prompt_tokens: 6, completion_tokens: 3 } },
+    ];
+    const client = {
+      chat: {
+        completions: {
+          create: async (body: Record<string, unknown>) => {
+            expect(body.stream).toBe(true);
+            return (async function* () {
+              yield* chunks;
+            })();
+          },
+        },
+      },
+    };
+    const provider = openai({ model: "gpt-x", client: client as never });
+    const gen = provider.toolsStream!({ messages: [{ role: "user", content: "?" }], tools: TOOLS });
+    const deltas: string[] = [];
+    let cur = await gen.next();
+    while (!cur.done) {
+      deltas.push(cur.value);
+      cur = await gen.next();
+    }
+    expect(deltas).toEqual(["Ich ", "suche…"]);
+    expect(cur.value.calls).toEqual([{ id: "c1", name: "lookup", input: { q: "x" } }]);
+    expect(cur.value.usage.inputTokens).toBe(6);
+  });
+
+  it("anthropic: yields text deltas and keeps thinking blocks carried on the final response", async () => {
+    const THINKING = { type: "thinking", thinking: "hm", signature: "sig" };
+    const events = [
+      { type: "content_block_delta", delta: { type: "thinking_delta", text: "hm" } },
+      { type: "content_block_delta", delta: { type: "text_delta", text: "Moment… " } },
+    ];
+    const client = {
+      messages: {
+        create: async () => ({ content: [] }),
+        stream: () => ({
+          [Symbol.asyncIterator]: async function* () {
+            yield* events;
+          },
+          finalMessage: async () => ({
+            content: [THINKING, { type: "text", text: "Moment… " }, { type: "tool_use", id: "c1", name: "lookup", input: {} }],
+            usage: { input_tokens: 5, output_tokens: 2 },
+          }),
+        }),
+      },
+    };
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    const gen = provider.toolsStream!({ messages: [{ role: "user", content: "?" }], tools: TOOLS, reasoningEffort: "low" });
+    const deltas: string[] = [];
+    let cur = await gen.next();
+    while (!cur.done) {
+      deltas.push(cur.value);
+      cur = await gen.next();
+    }
+    expect(deltas).toEqual(["Moment… "]);
+    expect(cur.value.calls).toHaveLength(1);
+    expect(cur.value.providerData).toEqual([THINKING]);
+  });
+});
+
 describe("openai token param & strict mode", () => {
   it("vendor API (no baseURL): the cap goes out as max_completion_tokens", async () => {
     const { client, sent } = captureOpenai({ content: "ok" });

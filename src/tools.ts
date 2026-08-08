@@ -133,6 +133,21 @@ export class CoaxToolError extends Error {
 
 type ToolsFn = (req: Pick<ToolsRequest, "messages" | "tools" | "toolChoice">) => Promise<ToolsResponse>;
 
+/** One STREAMING tool-calling turn: yields the turn's text deltas, returns the complete response. */
+type ToolsTurnFn = (req: Pick<ToolsRequest, "messages" | "tools" | "toolChoice">) => AsyncGenerator<string, ToolsResponse, void>;
+
+/**
+ * What a streaming run emits while it works — the payload a BFF forwards as SSE events:
+ * - `delta`: a text fragment of the current assistant turn (narration between tools, or the final answer),
+ * - `calling`: the model asked for a tool (spinner goes on),
+ * - `tool`: that tool finished, with the full invocation (spinner goes off; errors ride on `invocation.error`).
+ * Tool events of one turn arrive after the whole batch ran — calls within a turn execute concurrently.
+ */
+export type RunEvent =
+  | { type: "delta"; step: number; text: string }
+  | { type: "calling"; step: number; call: ToolCall }
+  | { type: "tool"; step: number; invocation: ToolInvocation };
+
 /** Resolves the possibly step-indexed `toolChoice` option to the plain value a provider sees. */
 function resolveToolChoice(toolChoice: RunOptions["toolChoice"], step: number): ToolChoice | undefined {
   return typeof toolChoice === "function" ? toolChoice(step) : toolChoice;
@@ -151,6 +166,24 @@ export async function runTools<C = unknown, T = unknown>(
   callTools: ToolsFn,
   opts: RunOptions<C, T> & { messages: Message[] },
 ): Promise<RunResult<T>> {
+  // The streaming driver is THE driver; a non-streaming turn is just one that yields no deltas.
+  const adapt: ToolsTurnFn = (req) => (async function* () { return await callTools(req); })();
+  const gen = runToolsStream<C, T>(adapt, opts);
+  let cur = await gen.next();
+  while (!cur.done) cur = await gen.next();
+  return cur.value;
+}
+
+/**
+ * The streaming form of `runTools` — the driver behind `ai.runStream()`. Yields `RunEvent`s while the
+ * run works and returns the same `RunResult` as `runTools` when it ends. Identical semantics
+ * everywhere else: feed-back-not-throw tool failures, typed `output` delivery, budgets, abort,
+ * and errors that carry the run's partial state.
+ */
+export async function* runToolsStream<C = unknown, T = unknown>(
+  callTurn: ToolsTurnFn,
+  opts: RunOptions<C, T> & { messages: Message[] },
+): AsyncGenerator<RunEvent, RunResult<T>, void> {
   const messages = [...opts.messages];
   // `undefined` (never set) defaults to 8; `null` (set on purpose) means unlimited. `?? 8` alone can't
   // tell those apart — it would also replace an explicit `null` with 8.
@@ -187,7 +220,13 @@ export async function runTools<C = unknown, T = unknown>(
 
     let res: ToolsResponse;
     try {
-      res = await callTools({ messages, tools: definitions, toolChoice: resolveToolChoice(opts.toolChoice, step) });
+      const turn = callTurn({ messages, tools: definitions, toolChoice: resolveToolChoice(opts.toolChoice, step) });
+      let cur = await turn.next();
+      while (!cur.done) {
+        if (cur.value) yield { type: "delta", step, text: cur.value };
+        cur = await turn.next();
+      }
+      res = cur.value;
     } catch (err) {
       // An abort mid-call carries only that call's (empty) usage — add what this run spent before it,
       // plus the transcript/calls so far, so an aborted run is resumable exactly like a CoaxToolError.
@@ -222,6 +261,9 @@ export async function runTools<C = unknown, T = unknown>(
     }
 
     messages.push({ role: "assistant", content: res.text, toolCalls: res.calls, ...(res.providerData !== undefined ? { providerData: res.providerData } : {}) });
+
+    for (const call of res.calls) yield { type: "calling", step, call };
+    const batchStart = calls.length;
 
     // Independent calls in one turn run concurrently — the model asked for them together precisely
     // because they don't depend on each other.
@@ -265,6 +307,9 @@ export async function runTools<C = unknown, T = unknown>(
         }
       }),
     );
+
+    // `record()` pushed this batch's invocations in completion order — emit them the same way.
+    for (const invocation of calls.slice(batchStart)) yield { type: "tool", step, invocation };
 
     messages.push({ role: "user", content: "", toolResults: results });
   }

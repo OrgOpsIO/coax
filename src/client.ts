@@ -183,6 +183,9 @@ export interface Client {
   }): AsyncGenerator<string, TextResult, void>;
   /** One native tool-calling turn. `ai.run()` drives the loop over this. */
   tools(req: ToolsRequest): Promise<ToolsResponse>;
+  /** One STREAMING tool-calling turn: yields the turn's text deltas, returns the complete response.
+   *  Providers without `toolsStream` degrade to a non-streaming turn that yields nothing. */
+  toolsStream(req: ToolsRequest): AsyncGenerator<string, ToolsResponse, void>;
   /** Speech-to-text. Throws CoaxUnsupportedError where the endpoint has no transcription. */
   transcribe(req: TranscribeRequest): Promise<TranscribeResult>;
   /** Text-to-speech. Throws CoaxUnsupportedError where the endpoint has no speech synthesis. */
@@ -403,6 +406,29 @@ export function createClient(opts: ClientOptions): Client {
       const res = await aborting(req.signal, emptyUsage, () => capability("tools", "tool calling")(req));
       await onUsage?.(res.usage, res.model);
       return res;
+    },
+
+    async *toolsStream(req: ToolsRequest): AsyncGenerator<string, ToolsResponse, void> {
+      if (!provider.toolsStream) {
+        // Non-streaming degrade — the turn still needs the tools capability to exist at all.
+        const res = await aborting(req.signal, emptyUsage, () => capability("tools", "tool calling")(req));
+        await onUsage?.(res.usage, res.model);
+        return res;
+      }
+      const gen = provider.toolsStream(req);
+      try {
+        if (req.signal?.aborted) throw new CoaxAbortError();
+        let cur = await gen.next();
+        while (!cur.done) {
+          yield cur.value;
+          cur = await gen.next();
+        }
+        await onUsage?.(cur.value.usage, cur.value.model);
+        return cur.value;
+      } catch (err) {
+        if (req.signal?.aborted && !(err instanceof CoaxAbortError)) throw new CoaxAbortError(emptyUsage(), err);
+        throw err;
+      }
     },
 
     async transcribe(req: TranscribeRequest): Promise<TranscribeResult> {

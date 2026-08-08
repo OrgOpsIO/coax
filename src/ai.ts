@@ -5,7 +5,7 @@ import { CoaxAbortError, createClient, type ObjectResult, type SpeakResult, type
 import { createRegistry, retrying, type CallSettings } from "./registry";
 import { parsePrompt, renderTemplate, type ParsedPrompt } from "./prompt-file";
 import { runLoop, type LoopOptions } from "./loop";
-import { runTools, type RunOptions, type RunResult, type Tool } from "./tools";
+import { runTools, runToolsStream, type RunEvent, type RunOptions, type RunResult, type Tool } from "./tools";
 
 export interface ObjectCall<T> {
   /** Model alias (from config.models) or a literal "provider:model". Falls back to defaults.model. */
@@ -139,6 +139,15 @@ export interface TextStream {
   result: Promise<TextResult>;
 }
 
+/** What `ai.runStream()` opens: run events while the agent works, and the final result once drained. */
+export interface RunStream<T = unknown> {
+  /** `delta` / `calling` / `tool` events in occurrence order. Iterate exactly once. */
+  events: AsyncIterable<RunEvent>;
+  /** Resolves with the full `RunResult` once `events` has been fully consumed; rejects (CoaxToolError,
+   *  CoaxAbortError, …) if the run dies — with the partial state riding on the error as always. */
+  result: Promise<RunResult<T>>;
+}
+
 /** Recursively optional — the honest type of an object still being generated. */
 export type DeepPartial<T> = T extends (infer U)[] ? DeepPartial<U>[] : T extends object ? { [K in keyof T]?: DeepPartial<T[K]> } : T;
 
@@ -216,6 +225,14 @@ export interface AI {
    * validated answer tool instead — the typed object lands on `RunResult.data`.
    */
   run<C = unknown, T = unknown>(call: RunCall<C, T>): Promise<RunResult<T>>;
+  /**
+   * The streaming form of `run()` — same call shape, but the run emits `RunEvent`s while it works:
+   * text deltas of every assistant turn (narration between tools, the final answer), a `calling` event
+   * when the model asks for a tool, a `tool` event when it finished. Same opening/fallback semantics
+   * as `stream()`: fallback covers a primary that dies before the first event, after that the run is
+   * committed. `result` resolves with the full `RunResult` once `events` is drained.
+   */
+  runStream<C = unknown, T = unknown>(call: RunCall<C, T>): Promise<RunStream<T>>;
   /**
    * Agent loop: each turn returns a typed step (usually a discriminated union); your `onStep` handler
    * either finishes or feeds back the next user message. Built-in doom guard + optional token budget.
@@ -430,6 +447,43 @@ export function createAI(config: AIConfig): AI {
           },
         ),
       );
+    },
+
+    async runStream<C = unknown, T = unknown>(call: RunCall<C, T>): Promise<RunStream<T>> {
+      const messages = call.messages?.length ? call.messages : call.prompt != null ? [{ role: "user" as const, content: call.prompt }] : undefined;
+      if (!messages) throw new Error("coax: provide either `prompt` or `messages`");
+      const opened = await withFallback(call.model, call.model, call.purpose ?? "runStream", async (client, callSettings) => {
+        const gen = runToolsStream<C, T>(
+          (req) =>
+            client.toolsStream({
+              system: call.system,
+              messages: req.messages,
+              tools: req.tools,
+              toolChoice: req.toolChoice,
+              maxTokens: call.maxTokens ?? d.maxTokens,
+              cacheSystem: call.cache ?? d.cache,
+              cacheConversation: call.cacheConversation,
+              headers: call.headers,
+              signal: call.signal,
+              reasoningEffort: reasoningEffortFor(call.reasoningEffort, callSettings),
+              extraBody: call.extraBody,
+            }),
+          {
+            messages,
+            tools: call.tools,
+            context: call.context,
+            output: call.output,
+            maxSteps: call.maxSteps !== undefined ? call.maxSteps : d.maxSteps,
+            budget: call.budget,
+            signal: call.signal,
+            onToolCall: call.onToolCall,
+            toolChoice: call.toolChoice,
+          },
+        );
+        return { gen, first: await gen.next() };
+      });
+      const { stream, result } = split(opened);
+      return { events: stream, result };
     },
 
     loop<T, R>(opts: LoopOptions<T, R>): Promise<R> {

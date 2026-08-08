@@ -35,6 +35,7 @@ export function retrying(provider: Provider, cfg?: RetryConfig): Provider {
     // first delta are covered by the ai-layer fallback instead.
     ...(provider.textStream ? { textStream: (req: Parameters<NonNullable<Provider["textStream"]>>[0]) => provider.textStream!(req) } : {}),
     ...(provider.structuredStream ? { structuredStream: (req: Parameters<NonNullable<Provider["structuredStream"]>>[0]) => provider.structuredStream!(req) } : {}),
+    ...(provider.toolsStream ? { toolsStream: (req: Parameters<NonNullable<Provider["toolsStream"]>>[0]) => provider.toolsStream!(req) } : {}),
     ...(provider.embed ? { embed: (req: Parameters<NonNullable<Provider["embed"]>>[0]) => withRetry(() => provider.embed!(req), cfg, req.signal) } : {}),
     // Optional capabilities are forwarded only where the provider has them, so `capability is missing`
     // stays detectable through the wrapper.

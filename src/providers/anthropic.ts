@@ -288,49 +288,66 @@ export function anthropic(opts: AnthropicOptions): Provider {
     },
 
     async tools(req: ToolsRequest): Promise<ToolsResponse> {
-      const thinking = Boolean(req.reasoningEffort && req.reasoningEffort !== "none");
-      // Anthropic only allows tool_choice "auto"/"none" while thinking — forcing a tool ("required" →
-      // "any") is a 400 from the endpoint; make it a clear error here instead.
-      if (thinking && req.toolChoice === "required") {
-        throw new Error(
-          'coax: toolChoice "required" cannot be combined with a reasoningEffort on Anthropic — ' +
-            'thinking only permits tool_choice "auto"/"none". Drop one of the two for this call (a step-indexed ' +
-            'toolChoice can force step 0 without thinking and re-enable it later).',
-        );
-      }
       const c = await getClient();
-      const maxTokens = req.maxTokens ?? opts.maxTokens ?? 8192;
-      const resp = await createMessage(
-        c,
-        withExtraBody(
-          {
-            model: opts.model,
-            max_tokens: maxTokens,
-            ...systemParam(req.system, req.cacheSystem),
-            tools: req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.jsonSchema })),
-            messages: toMessages(req.messages, req.cacheConversation),
-            ...toolChoiceParam(req.toolChoice),
-            ...thinkingParam(req.reasoningEffort, maxTokens),
-          },
-          opts.extraBody,
-          req.extraBody,
-        ),
-        requestOptions(req.headers, req.signal),
-      );
-      const calls: ToolCall[] = resp.content
-        .filter((b): b is { type: "tool_use"; id: string; name: string; input: unknown } => isBlock(b, "tool_use"))
-        .map((b) => ({ id: b.id, name: b.name, input: b.input }));
-      // Thinking blocks (incl. redacted ones) must be replayed verbatim — signature and all — at the
-      // START of this turn's assistant message on the next request. Hand them back opaquely; runTools
-      // stores them on the message, toContent puts them back in front.
-      const carried = resp.content.filter((b) => isBlock(b, "thinking") || isBlock(b, "redacted_thinking"));
-      return {
-        text: textOf(resp.content),
-        calls,
-        usage: mapUsage(resp.usage),
-        model: opts.model,
-        ...(carried.length ? { providerData: carried } : {}),
-      };
+      const resp = await createMessage(c, toolsBody(req), requestOptions(req.headers, req.signal));
+      return toToolsResponse(resp);
+    },
+
+    async *toolsStream(req: ToolsRequest): AsyncGenerator<string, ToolsResponse, void> {
+      const c = await getClient();
+      const s = c.messages.stream(toolsBody(req), requestOptions(req.headers, req.signal));
+      // Text deltas stream out; thinking deltas stay internal, and tool-call arguments only matter
+      // complete — both arrive with the final message.
+      for await (const event of s as unknown as AsyncIterable<{ type: string; delta?: { type?: string; text?: string } }>) {
+        if (event.type === "content_block_delta" && event.delta?.type === "text_delta" && event.delta.text) yield event.delta.text;
+      }
+      return toToolsResponse(await s.finalMessage());
     },
   };
+
+  /** The wire body of one tool-calling turn — shared by `tools()` and `toolsStream()`. */
+  function toolsBody(req: ToolsRequest): Record<string, unknown> {
+    const thinking = Boolean(req.reasoningEffort && req.reasoningEffort !== "none");
+    // Anthropic only allows tool_choice "auto"/"none" while thinking — forcing a tool ("required" →
+    // "any") is a 400 from the endpoint; make it a clear error here instead.
+    if (thinking && req.toolChoice === "required") {
+      throw new Error(
+        'coax: toolChoice "required" cannot be combined with a reasoningEffort on Anthropic — ' +
+          'thinking only permits tool_choice "auto"/"none". Drop one of the two for this call (a step-indexed ' +
+          'toolChoice can force step 0 without thinking and re-enable it later).',
+      );
+    }
+    const maxTokens = req.maxTokens ?? opts.maxTokens ?? 8192;
+    return withExtraBody(
+      {
+        model: opts.model,
+        max_tokens: maxTokens,
+        ...systemParam(req.system, req.cacheSystem),
+        tools: req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.jsonSchema })),
+        messages: toMessages(req.messages, req.cacheConversation),
+        ...toolChoiceParam(req.toolChoice),
+        ...thinkingParam(req.reasoningEffort, maxTokens),
+      },
+      opts.extraBody,
+      req.extraBody,
+    );
+  }
+
+  /** Map a complete response to the neutral ToolsResponse — shared by `tools()` and `toolsStream()`. */
+  function toToolsResponse(resp: AnthropicResponse): ToolsResponse {
+    const calls: ToolCall[] = resp.content
+      .filter((b): b is { type: "tool_use"; id: string; name: string; input: unknown } => isBlock(b, "tool_use"))
+      .map((b) => ({ id: b.id, name: b.name, input: b.input }));
+    // Thinking blocks (incl. redacted ones) must be replayed verbatim — signature and all — at the
+    // START of this turn's assistant message on the next request. Hand them back opaquely; runTools
+    // stores them on the message, toContent puts them back in front.
+    const carried = resp.content.filter((b) => isBlock(b, "thinking") || isBlock(b, "redacted_thinking"));
+    return {
+      text: textOf(resp.content),
+      calls,
+      usage: mapUsage(resp.usage),
+      model: opts.model,
+      ...(carried.length ? { providerData: carried } : {}),
+    };
+  }
 }

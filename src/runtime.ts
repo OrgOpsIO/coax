@@ -53,6 +53,7 @@ export const ai: AI = {
   embed: async (call) => current().embed(call),
   judge: async (call) => current().judge(call),
   run: async (call) => current().run(call),
+  runStream: async (call) => current().runStream(call),
   loop: async (opts) => current().loop(opts),
   transcribe: async (call) => current().transcribe(call),
   speak: async (call) => current().speak(call),

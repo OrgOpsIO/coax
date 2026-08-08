@@ -336,6 +336,52 @@ export function openai(opts: OpenAiOptions): Provider {
       return { text: message?.content ?? "", calls, usage: mapUsage(resp.usage), model: opts.model };
     },
 
+    async *toolsStream(req: ToolsRequest): AsyncGenerator<string, ToolsResponse, void> {
+      const c = await getClient();
+      const stream = (await c.chat.completions.create(
+        withExtraBody(
+          {
+            model: opts.model,
+            [tokenParam]: req.maxTokens ?? opts.maxTokens ?? 8192,
+            messages: toMessages(req.system, req.messages),
+            tools: req.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.jsonSchema } })),
+            tool_choice: req.toolChoice ?? "auto",
+            ...(req.reasoningEffort ? { reasoning_effort: req.reasoningEffort } : {}),
+            stream: true,
+            stream_options: { include_usage: true },
+          },
+          opts.extraBody,
+          req.extraBody,
+        ),
+        requestOptions(req.headers, req.signal),
+      )) as unknown as AsyncIterable<{
+        choices?: { delta?: { content?: string | null; tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[] } }[];
+        usage?: Record<string, unknown>;
+      }>;
+
+      // Tool calls arrive as fragments keyed by index — id/name on the first fragment, arguments
+      // spread across many. Only text streams out; calls matter complete.
+      const slots: { id?: string; name?: string; args: string }[] = [];
+      let text = "";
+      let usage: Record<string, unknown> | undefined;
+      for await (const chunk of stream) {
+        const delta = chunk.choices?.[0]?.delta;
+        if (delta?.content) {
+          text += delta.content;
+          yield delta.content;
+        }
+        for (const tc of delta?.tool_calls ?? []) {
+          const slot = (slots[tc.index ?? 0] ??= { args: "" });
+          if (tc.id) slot.id = tc.id;
+          if (tc.function?.name) slot.name = tc.function.name;
+          if (tc.function?.arguments) slot.args += tc.function.arguments;
+        }
+        if (chunk.usage) usage = chunk.usage;
+      }
+      const calls: ToolCall[] = slots.filter(Boolean).map((s, i) => ({ id: s.id ?? `call_${i}`, name: s.name ?? "", input: parseArguments(s.args) }));
+      return { text, calls, usage: mapUsage(usage), model: opts.model };
+    },
+
     async transcribe(req: TranscribeRequest): Promise<TranscribeResponse> {
       const c = await getClient();
       const { toFile } = await import("openai");
