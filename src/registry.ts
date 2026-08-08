@@ -55,7 +55,7 @@ export function createRegistry(config: AIConfig) {
     const common = { model, apiKey: spec.apiKey, baseURL: spec.baseURL, headers: spec.headers, extraBody: spec.extraBody };
     return api === "anthropic"
       ? anthropic(common)
-      : openai({ ...common, transcribeModel: spec.transcribeModel, speakModel: spec.speakModel });
+      : openai({ ...common, transcribeModel: spec.transcribeModel, speakModel: spec.speakModel, tokenParam: spec.tokenParam, strict: spec.strict });
   }
 
   function providerFor(providerName: string, model: string): Provider {
