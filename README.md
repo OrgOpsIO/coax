@@ -268,9 +268,10 @@ try {
   a no-op where caching is automatic). Big savings across a fan-out that shares a stable system prompt.
   `cacheConversation: true` marks the conversation-so-far as reusable, so a loop's next turn reads all
   prior turns from cache instead of re-billing the whole transcript.
-- **Streaming** — `ai.stream()` yields text deltas as they arrive; `ai.streamObject()` yields partial
-  objects while the model writes, with `object()`'s validate→repair contract on the final result.
-  Model fallback still covers a primary that dies before its first token.
+- **Streaming** — every surface streams: `ai.stream()` yields text deltas, `ai.streamObject()` partial
+  objects while the model writes (validate→repair on the final result), `ai.runStream()` live run
+  events (deltas, tool calls, tool results). Model fallback still covers a primary that dies before
+  its first token.
 - **Embeddings** — `ai.embed()` returns one vector per input, through the same alias/fallback/usage
   plumbing as every other call (`embedModel` names the model per endpoint).
 - **Tools** — `ai.run()` hands the model typed tools and runs the whole call/validate/reply loop. With
@@ -467,6 +468,24 @@ const { data, repairs } = await result;                  // validated, self-repa
 Partials are *unvalidated* snapshots (coax's aggressive parser closes the truncated JSON at every
 step); only `result` is schema-checked. A repair round streams as well — the partials restart, the
 consumer just keeps rendering.
+
+Agent runs stream too — `ai.runStream()` is `run()` with a live feed: text deltas of every assistant
+turn (the narration between tools, the final answer), `calling` when the model asks for a tool,
+`tool` when it finished. Exactly what a chat UI needs for spinners and progress:
+
+```ts
+const { events, result } = await ai.runStream({ model: "local", prompt: question, tools });
+for await (const e of events) {
+  if (e.type === "delta") ui.append(e.text);
+  if (e.type === "calling") ui.spinner(e.call.name, "on");
+  if (e.type === "tool") ui.spinner(e.invocation.name, "off");
+}
+const { text, calls, usage } = await result;   // the same RunResult run() returns
+```
+
+Every surface of coax streams: `stream()` for text, `streamObject()` for typed data, `runStream()`
+for agents. All three share the same contract — fallback until the first event, committed after,
+`result` once drained.
 
 ### Vision
 

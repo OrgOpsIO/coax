@@ -2,14 +2,14 @@
 export { configure, ai, isConfigured, reset } from "./runtime";
 // Explicit instance (recommended for libraries, tests, multiple configs).
 export { createAI } from "./ai";
-export type { AI, ObjectCall, TextCall, TextStream, ObjectStream, DeepPartial, JudgeCall, Judgement, RunCall, EmbedCall, TranscribeCall, SpeakCall } from "./ai";
+export type { AI, ObjectCall, TextCall, TextStream, ObjectStream, RunStream, DeepPartial, JudgeCall, Judgement, RunCall, EmbedCall, TranscribeCall, SpeakCall } from "./ai";
 export type { AIConfig, ProviderConfig, ProviderEndpoint, ModelConfig, RetryConfig, CallDefaults, CallMeta } from "./config";
 export { parsePrompt, renderTemplate } from "./prompt-file";
 export type { ParsedPrompt, PromptMeta } from "./prompt-file";
 
 // Tools — definitions the model may call, and the driver behind ai.run().
-export { tool, runTools, CoaxToolError, FINAL_TOOL } from "./tools";
-export type { Tool, ToolContext, ToolInvocation, RunOptions, RunResult } from "./tools";
+export { tool, runTools, runToolsStream, CoaxToolError, FINAL_TOOL } from "./tools";
+export type { Tool, ToolContext, ToolInvocation, RunOptions, RunResult, RunEvent } from "./tools";
 
 // Low-level primitives (single provider, no config layer).
 export { createClient, CoaxAbortError, CoaxSchemaError, CoaxUnsupportedError } from "./client";
