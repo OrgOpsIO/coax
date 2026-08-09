@@ -271,6 +271,28 @@ export interface Provider {
   speak?(req: SpeakRequest): Promise<SpeakResponse>;
 }
 
+/**
+ * Raised when the endpoint's safety layer declined the request (Anthropic `stop_reason: "refusal"`,
+ * an HTTP 200 whose content is empty or a discarded partial). Without this, a refusal would surface as
+ * a SUCCESSFUL call with empty text — booked as if the model had answered. Non-transient by design:
+ * `withRetry` sees no status/code and rethrows immediately; the ai-layer model fallback still applies,
+ * which is the right rescue for a false-positive classifier hit.
+ */
+export class CoaxRefusalError extends Error {
+  constructor(
+    readonly model: string,
+    /** Anthropic `stop_details.category` (e.g. "cyber", "bio") — null when the endpoint gave none. */
+    readonly category: string | null = null,
+    readonly explanation: string | null = null,
+  ) {
+    super(
+      `coax: ${model} refused the request (stop_reason "refusal"${category ? `, category "${category}"` : ""})` +
+        (explanation ? ` — ${explanation}` : ""),
+    );
+    this.name = "CoaxRefusalError";
+  }
+}
+
 export const emptyUsage = (): Usage => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
 
 export const addUsage = (a: Usage, b: Usage): Usage => ({

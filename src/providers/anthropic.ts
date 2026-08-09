@@ -1,16 +1,17 @@
 import type AnthropicSdk from "@anthropic-ai/sdk";
-import type {
-  Message,
-  Provider,
-  ProviderResponse,
-  ReasoningEffort,
-  StructuredRequest,
-  TextRequest,
-  ToolCall,
-  ToolChoice,
-  ToolsRequest,
-  ToolsResponse,
-  Usage,
+import {
+  CoaxRefusalError,
+  type Message,
+  type Provider,
+  type ProviderResponse,
+  type ReasoningEffort,
+  type StructuredRequest,
+  type TextRequest,
+  type ToolCall,
+  type ToolChoice,
+  type ToolsRequest,
+  type ToolsResponse,
+  type Usage,
 } from "../types";
 
 export interface AnthropicOptions {
@@ -28,7 +29,12 @@ export interface AnthropicOptions {
   extraBody?: Record<string, unknown>;
 }
 
-type AnthropicResponse = { content: unknown[]; usage?: Record<string, number> };
+type AnthropicResponse = {
+  content: unknown[];
+  usage?: Record<string, number>;
+  stop_reason?: string | null;
+  stop_details?: { category?: string | null; explanation?: string | null } | null;
+};
 type RequestOptions = { headers?: Record<string, string>; signal?: AbortSignal };
 type AnyClient = {
   messages: {
@@ -37,11 +43,21 @@ type AnyClient = {
   };
 };
 
+// A safety-classifier decline is an HTTP 200 with stop_reason "refusal" and empty (or discarded-partial)
+// content. Returning that as success would book an empty answer; every response path runs through this
+// so a refusal surfaces as an error the caller (and its usage recording) can see.
+function assertNotRefusal(resp: AnthropicResponse, model: string): AnthropicResponse {
+  if (resp.stop_reason === "refusal") {
+    throw new CoaxRefusalError(model, resp.stop_details?.category ?? null, resp.stop_details?.explanation ?? null);
+  }
+  return resp;
+}
+
 // The SDK REFUSES non-streaming requests whose max_tokens imply a >10-minute response ("Streaming is
 // required for operations that may take longer than 10 minutes"), which large structured outputs hit.
 // Stream under the hood and return the accumulated final message — identical result, no ceiling.
 async function createMessage(c: AnyClient, body: Record<string, unknown>, options?: RequestOptions): Promise<AnthropicResponse> {
-  return c.messages.stream(body, options).finalMessage();
+  return assertNotRefusal(await c.messages.stream(body, options).finalMessage(), String(body.model));
 }
 
 function mapUsage(u: Record<string, number> | undefined): Usage {
@@ -254,7 +270,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
       for await (const event of s as unknown as AsyncIterable<{ type: string; delta?: { type?: string; partial_json?: string } }>) {
         if (event.type === "content_block_delta" && event.delta?.type === "input_json_delta" && event.delta.partial_json) yield event.delta.partial_json;
       }
-      const final = await s.finalMessage();
+      const final = assertNotRefusal(await s.finalMessage(), opts.model);
       const tool = final.content.find((b): b is { type: "tool_use"; input: unknown } => isBlock(b, "tool_use"));
       const raw = tool?.input;
       return { raw, text: raw === undefined ? "" : JSON.stringify(raw), usage: mapUsage(final.usage), model: opts.model };
@@ -282,7 +298,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
       for await (const event of s as unknown as AsyncIterable<{ type: string; delta?: { type?: string; text?: string } }>) {
         if (event.type === "content_block_delta" && event.delta?.type === "text_delta" && event.delta.text) yield event.delta.text;
       }
-      const final = await s.finalMessage();
+      const final = assertNotRefusal(await s.finalMessage(), opts.model);
       const text = textOf(final.content);
       return { raw: text, text, usage: mapUsage(final.usage), model: opts.model };
     },
@@ -301,7 +317,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
       for await (const event of s as unknown as AsyncIterable<{ type: string; delta?: { type?: string; text?: string } }>) {
         if (event.type === "content_block_delta" && event.delta?.type === "text_delta" && event.delta.text) yield event.delta.text;
       }
-      return toToolsResponse(await s.finalMessage());
+      return toToolsResponse(assertNotRefusal(await s.finalMessage(), opts.model));
     },
   };
 

@@ -506,3 +506,72 @@ describe("registry: compatible endpoints", () => {
     expect(retrying(registry.resolve("anthropic:claude-x").primary).speak).toBeUndefined();
   });
 });
+
+describe("anthropic refusal stop_reason", () => {
+  const REFUSAL = {
+    content: [],
+    usage: { input_tokens: 9, output_tokens: 0 },
+    stop_reason: "refusal",
+    stop_details: { category: "cyber", explanation: "declined by safety classifier" },
+  };
+
+  /** A client whose every call resolves to the given final message (create and stream alike). */
+  function refusingClient(final: Record<string, unknown>) {
+    return {
+      messages: {
+        create: async () => final,
+        stream: () => ({
+          finalMessage: async () => final,
+          async *[Symbol.asyncIterator]() {},
+        }),
+      },
+    };
+  }
+
+  it("text(): throws CoaxRefusalError instead of returning success with empty text", async () => {
+    const provider = anthropic({ model: "claude-opus-5", client: refusingClient(REFUSAL) as never });
+    await expect(provider.text({ messages: [{ role: "user", content: "?" }] })).rejects.toMatchObject({
+      name: "CoaxRefusalError",
+      model: "claude-opus-5",
+      category: "cyber",
+    });
+  });
+
+  it("structured(): throws instead of feeding the repair loop an empty tool result", async () => {
+    const provider = anthropic({ model: "claude-opus-5", client: refusingClient(REFUSAL) as never });
+    await expect(
+      provider.structured({ messages: [{ role: "user", content: "?" }], jsonSchema: { type: "object" }, schemaName: "out" }),
+    ).rejects.toMatchObject({ name: "CoaxRefusalError" });
+  });
+
+  it("tools(): throws instead of returning an empty turn", async () => {
+    const provider = anthropic({ model: "claude-opus-5", client: refusingClient(REFUSAL) as never });
+    await expect(provider.tools!({ messages: [{ role: "user", content: "?" }], tools: TOOLS })).rejects.toMatchObject({
+      name: "CoaxRefusalError",
+    });
+  });
+
+  it("textStream(): the refusal surfaces when the stream finalizes", async () => {
+    const provider = anthropic({ model: "claude-opus-5", client: refusingClient(REFUSAL) as never });
+    const consume = async () => {
+      const s = provider.textStream!({ messages: [{ role: "user", content: "?" }] });
+      let step = await s.next();
+      while (!step.done) step = await s.next();
+      return step.value;
+    };
+    await expect(consume()).rejects.toMatchObject({ name: "CoaxRefusalError" });
+  });
+
+  it("tolerates endpoints without stop_details and normal stop reasons", async () => {
+    const ok = { content: [{ type: "text", text: "hi" }], usage: { input_tokens: 1, output_tokens: 1 }, stop_reason: "end_turn" };
+    const provider = anthropic({ model: "claude-opus-5", client: refusingClient(ok) as never });
+    const res = await provider.text({ messages: [{ role: "user", content: "?" }] });
+    expect(res.text).toBe("hi");
+
+    const bare = anthropic({ model: "claude-opus-5", client: refusingClient({ ...REFUSAL, stop_details: null }) as never });
+    await expect(bare.text({ messages: [{ role: "user", content: "?" }] })).rejects.toMatchObject({
+      name: "CoaxRefusalError",
+      category: null,
+    });
+  });
+});

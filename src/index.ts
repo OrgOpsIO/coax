@@ -31,7 +31,7 @@ export type { OpenAiOptions } from "./providers/openai";
 // Building blocks / types.
 export { extractJson } from "./parse";
 export { toProviderSchema, formatIssues, safeParse } from "./schema";
-export { addUsage, emptyUsage } from "./types";
+export { addUsage, emptyUsage, CoaxRefusalError } from "./types";
 export type {
   AudioFormat,
   AudioInput,
