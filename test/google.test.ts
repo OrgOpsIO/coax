@@ -935,3 +935,179 @@ describe("refusal usage in the vendor-neutral layer (T14)", () => {
     expect(seen).toEqual([{ inputTokens: 7, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }]);
   });
 });
+
+// Measurer (stage 1): proofs the tests above leave open — each one kills a mutation of google.ts or
+// client.ts that every earlier test survives (decisions/stage-01-measurement.md lists them).
+describe("measurer: what the earlier proofs left open", () => {
+  it("a streamed turn goes back verbatim — signed text and the empty-text signature part included", async () => {
+    const first = fake([], [fixture("tools-stream.chunks.json")]);
+    const turn = (await drain(provider(first.client).toolsStream!({ messages: [user("?")], tools: [LOOKUP] }))).result;
+    const { client, sent } = fake([answer("ok")]);
+    await provider(client).tools!({
+      messages: [
+        user("?"),
+        { role: "assistant", content: turn.text, toolCalls: turn.calls, providerData: turn.providerData },
+        { role: "user", content: "", toolResults: [{ id: "call-1", name: "lookup", output: "x" }] },
+      ],
+      tools: [LOOKUP],
+    });
+    expect(sent[0]!.contents[1]).toEqual({
+      role: "model",
+      parts: [
+        { text: "Ich schaue " },
+        { text: "nach…", thoughtSignature: "c2lnLXRleHQ=" },
+        { functionCall: { id: "call-1", name: "lookup", args: { q: "x" } }, thoughtSignature: "c2lnLWNhbGw=" },
+        { text: "", thoughtSignature: "c2lnLWVuZA==" },
+      ],
+    });
+    expect(sent[0]!.contents[2]).toEqual({ role: "user", parts: [{ functionResponse: { id: "call-1", name: "lookup", response: { output: "x" } } }] });
+  });
+
+  it("a stream that ends in MALFORMED_FUNCTION_CALL fails after its deltas — a plain Error, never an empty success", async () => {
+    // Composed from the @google/genai 2.27.0 types (genai.d.ts: Candidate.finishReason/finishMessage, enum FinishReason).
+    const chunks = [
+      { candidates: [{ content: { role: "model", parts: [{ text: "Let me " }] } }] },
+      {
+        candidates: [{ content: { role: "model", parts: [] }, finishReason: "MALFORMED_FUNCTION_CALL", finishMessage: "bad args" }],
+        usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 2, totalTokenCount: 7 },
+      },
+    ];
+    const { client } = fake([], [chunks]);
+    const { deltas, error } = await drainToError(provider(client).toolsStream!({ messages: [user("?")], tools: [LOOKUP] }));
+    expect(deltas).toEqual(["Let me "]);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(CoaxRefusalError);
+    expect((error as Error).message).toMatch(/finishReason "MALFORMED_FUNCTION_CALL": bad args/);
+  });
+
+  // Every filter finish of decisions/stage-01-google-refusals.md, not only the three the fixtures show.
+  for (const reason of ["SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "MODEL_ARMOR", "RECITATION", "IMAGE_RECITATION"]) {
+    it(`finishReason ${reason} → CoaxRefusalError with category, explanation and usage (text and textStream)`, async () => {
+      const reply = {
+        candidates: [{ content: { role: "model", parts: [] }, finishReason: reason, finishMessage: "stopped" }],
+        usageMetadata: { promptTokenCount: 4, totalTokenCount: 4 },
+      };
+      const { client } = fake([reply], [[reply]]);
+      const p = provider(client);
+      const want = { name: "CoaxRefusalError", model: MODEL, category: reason, explanation: "stopped", usage: { inputTokens: 4, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } };
+      await expect(p.text({ messages: [user("?")] })).rejects.toMatchObject(want);
+      expect((await drainToError(p.textStream!({ messages: [user("?")] }))).error).toMatchObject(want);
+    });
+  }
+
+  it("a blocked prompt's blockReasonMessage becomes the explanation", async () => {
+    // Composed from genai.d.ts: GenerateContentResponsePromptFeedback { blockReason, blockReasonMessage }, BlockedReason.BLOCKLIST.
+    const { client } = fake([{ promptFeedback: { blockReason: "BLOCKLIST", blockReasonMessage: "Blocked by a blocklist." }, usageMetadata: { promptTokenCount: 4, totalTokenCount: 4 } }]);
+    await expect(provider(client).text({ messages: [user("?")] })).rejects.toMatchObject({
+      name: "CoaxRefusalError",
+      category: "BLOCKLIST",
+      explanation: "Blocked by a blocklist.",
+      usage: { inputTokens: 4 },
+    });
+  });
+
+  it("a SAFETY-stopped candidate reports the usage the platform's own example carries", async () => {
+    // safety-candidate.response.json dropped the example's usageMetadata. The example on
+    // https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/configure-safety-filters
+    // ends with "usageMetadata": { "promptTokenCount": 38, "totalTokenCount": 38 } (read 2026-10-07).
+    const reply = { ...fixture("safety-candidate.response.json"), usageMetadata: { promptTokenCount: 38, totalTokenCount: 38 } };
+    const { client } = fake([reply]);
+    await expect(provider(client).text({ messages: [user("?")] })).rejects.toMatchObject({
+      name: "CoaxRefusalError",
+      category: "SAFETY",
+      usage: { inputTokens: 38, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    });
+  });
+
+  it("toolsStream and structuredStream: a mid-stream block keeps its deltas, category, explanation and usage", async () => {
+    const want = { name: "CoaxRefusalError", category: "SAFETY", explanation: "Response stopped by the safety filter.", usage: { inputTokens: 12 } };
+    const { client } = fake([], [fixture("safety-stream.chunks.json")]);
+    const p = provider(client);
+    const viaTools = await drainToError(p.toolsStream!({ messages: [user("?")], tools: [LOOKUP] }));
+    expect(viaTools.deltas).toEqual(["Here is how "]);
+    expect(viaTools.error).toMatchObject(want);
+    const viaStructured = await drainToError(p.structuredStream!({ messages: [user("?")], jsonSchema: { type: "object" }, schemaName: "o" }));
+    expect(viaStructured.deltas).toEqual(["Here is how "]);
+    expect(viaStructured.error).toMatchObject(want);
+  });
+
+  it("toolsStream and structuredStream reject a blocked first chunk before any delta", async () => {
+    const want = { name: "CoaxRefusalError", category: "PROHIBITED_CONTENT", usage: { inputTokens: 7 } };
+    const { client } = fake([], [[fixture("blocked-prompt.response.json"), answer("never")]]);
+    const p = provider(client);
+    const viaTools = await drainToError(p.toolsStream!({ messages: [user("?")], tools: [LOOKUP] }));
+    expect(viaTools.deltas).toEqual([]);
+    expect(viaTools.error).toMatchObject(want);
+    const viaStructured = await drainToError(p.structuredStream!({ messages: [user("?")], jsonSchema: { type: "object" }, schemaName: "o" }));
+    expect(viaStructured.deltas).toEqual([]);
+    expect(viaStructured.error).toMatchObject(want);
+  });
+
+  it("structuredStream and toolsStream send exactly what their non-streaming twins send", async () => {
+    const { client, sent } = fake([answer("{}")], [[answer("{}")]]);
+    const p = provider(client, { headers: { a: "1" }, extraBody: { labels: { team: "x" } } });
+
+    const structured = {
+      messages: [user("?")],
+      jsonSchema: { type: "object", properties: { a: { type: "string", minLength: 1 } } },
+      schemaName: "o",
+      reasoningEffort: "low" as const,
+    };
+    await p.structured(structured);
+    await drain(p.structuredStream!(structured));
+    expect(sent[1]).toEqual(sent[0]);
+    expect(sent[0]!.config.responseMimeType).toBe("application/json");
+    expect(sent[0]!.config.responseJsonSchema).toEqual({ type: "object", properties: { a: { type: "string" } } });
+
+    const tools = { messages: [user("?")], tools: [TEMP_TOOL], toolChoice: "required" as const, reasoningEffort: "high" as const };
+    await p.tools!(tools);
+    await drain(p.toolsStream!(tools));
+    expect(sent[3]).toEqual(sent[2]);
+    expect(sent[2]!.config.toolConfig).toEqual({ functionCallingConfig: { mode: "ANY" } });
+    expect(sent[2]!.config.tools[0].functionDeclarations[0].name).toBe("get_current_temperature");
+  });
+
+  it("kind: pdf goes out as application/pdf whatever mediaType says (spec §2.4 rule 5)", async () => {
+    const { client, sent } = fake([answer("ok")]);
+    await provider(client).text({
+      messages: [{ role: "user", content: "Summarize.", media: [{ kind: "pdf", mediaType: "application/octet-stream", dataBase64: "JVBERi0xLjQ=" }] }],
+    });
+    expect(sent[0]!.contents[0].parts).toEqual([{ text: "Summarize." }, { inlineData: { mimeType: "application/pdf", data: "JVBERi0xLjQ=" } }]);
+  });
+
+  it("an aborted stream is not reported as a refusal (stream, streamObject, toolsStream)", async () => {
+    const USAGE = { inputTokens: 5, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    type C = ReturnType<typeof createClient>;
+    const paths: Record<string, (c: C, signal: AbortSignal) => Promise<unknown>> = {
+      stream: (c, signal) => drain(c.stream({ prompt: "?", signal })),
+      streamObject: (c, signal) => drain(c.streamObject({ schema: z.object({}), prompt: "?", signal })),
+      toolsStream: (c, signal) => drain(c.toolsStream({ messages: [user("?")], tools: [LOOKUP], signal })),
+    };
+    for (const [name, run] of Object.entries(paths)) {
+      // A fresh controller per path: an already-aborted signal would fail fast before the provider runs.
+      const ctrl = new AbortController();
+      const refuseAfterAbort = async function* (first: string): AsyncGenerator<string, never, void> {
+        yield first;
+        ctrl.abort();
+        throw new CoaxRefusalError("m", "SAFETY", null, USAGE);
+      };
+      const p = {
+        name: "fake",
+        model: "m",
+        async structured(): Promise<never> {
+          throw new Error("unused");
+        },
+        async text(): Promise<never> {
+          throw new Error("unused");
+        },
+        textStream: () => refuseAfterAbort("a"),
+        structuredStream: () => refuseAfterAbort("{"),
+        toolsStream: () => refuseAfterAbort("a"),
+      };
+      const seen: unknown[] = [];
+      const err = await run(createClient({ provider: p, onUsage: (u) => void seen.push(u) }), ctrl.signal).catch((e: unknown) => e);
+      expect(err, name).toBeInstanceOf(CoaxAbortError);
+      expect(seen, name).toEqual([]);
+    }
+  });
+});
