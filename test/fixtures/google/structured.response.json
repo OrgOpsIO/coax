@@ -1,0 +1,22 @@
+{
+  "source": "Model output text VERBATIM from the anyOf moderation example on https://ai.google.dev/gemini-api/docs/generate-content/structured-output (2026-10-06): structured output arrives as JSON TEXT inside a text part (no parsed object). Envelope (candidates/usageMetadata) COMPOSED from SDK v2.27.0 types.",
+  "kind": "sdk-generateContent-response",
+  "fixture": {
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "{\n\"decision\": {\n \"reason\": \"The content is an unsolicited prize notification attempting to trick the user into clicking a suspicious link.\",\n \"spam_type\": \"scam\"\n}\n}"
+            }
+          ]
+        },
+        "finishReason": "STOP",
+        "index": 0
+      }
+    ],
+    "usageMetadata": { "promptTokenCount": 120, "candidatesTokenCount": 38, "thoughtsTokenCount": 0, "totalTokenCount": 158 },
+    "modelVersion": "gemini-3.5-flash"
+  }
+}

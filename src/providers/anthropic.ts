@@ -48,7 +48,7 @@ type AnyClient = {
 // so a refusal surfaces as an error the caller (and its usage recording) can see.
 function assertNotRefusal(resp: AnthropicResponse, model: string): AnthropicResponse {
   if (resp.stop_reason === "refusal") {
-    throw new CoaxRefusalError(model, resp.stop_details?.category ?? null, resp.stop_details?.explanation ?? null);
+    throw new CoaxRefusalError(model, resp.stop_details?.category ?? null, resp.stop_details?.explanation ?? null, mapUsage(resp.usage));
   }
   return resp;
 }

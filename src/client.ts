@@ -3,6 +3,7 @@ import { extractJson } from "./parse";
 import { formatIssues, safeParse, toProviderSchema } from "./schema";
 import {
   addUsage,
+  CoaxRefusalError,
   emptyUsage,
   type EmbedRequest,
   type EmbedResponse,
@@ -201,6 +202,22 @@ function toMessages(prompt: string | undefined, messages: Message[] | undefined)
 export function createClient(opts: ClientOptions): Client {
   const { provider, onUsage } = opts;
 
+  // A refused call was still billed (a blocked prompt costs its input tokens): report it like any
+  // completed call, then let the error through unchanged. An abort keeps precedence — `aborting()` has
+  // already turned anything thrown after `signal.aborted` into a CoaxAbortError.
+  async function reportRefusal(err: unknown): Promise<void> {
+    if (err instanceof CoaxRefusalError) await onUsage?.(err.usage, err.model);
+  }
+
+  async function billed<T>(signal: AbortSignal | undefined, spent: () => Usage, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await aborting(signal, spent, fn);
+    } catch (err) {
+      await reportRefusal(err);
+      throw err;
+    }
+  }
+
   /** Resolve an optional provider capability, or fail with a message that names the missing piece. */
   function capability<K extends "tools" | "transcribe" | "speak" | "embed">(key: K, label: string): NonNullable<Provider[K]> {
     const fn = provider[key];
@@ -222,7 +239,7 @@ export function createClient(opts: ClientOptions): Client {
       let lastError = "";
 
       for (let attempt = 0; attempt <= maxRepairs; attempt++) {
-        const res = await aborting(req.signal, () => usage, () =>
+        const res = await billed(req.signal, () => usage, () =>
           provider.structured({
             system: req.system,
             messages,
@@ -257,7 +274,7 @@ export function createClient(opts: ClientOptions): Client {
     },
 
     async text(req): Promise<TextResult> {
-      const res = await aborting(req.signal, emptyUsage, () =>
+      const res = await billed(req.signal, emptyUsage, () =>
         provider.text({
           system: req.system,
           messages: toMessages(req.prompt, req.messages),
@@ -330,11 +347,12 @@ export function createClient(opts: ClientOptions): Client {
             res = cur.value;
           } catch (err) {
             if (req.signal?.aborted && !(err instanceof CoaxAbortError)) throw new CoaxAbortError(usage, err);
+            await reportRefusal(err);
             throw err;
           }
         } else {
           // No native structured streaming → one non-streaming call; the final object is the only partial.
-          res = await aborting(req.signal, () => usage, () => provider.structured(wire));
+          res = await billed(req.signal, () => usage, () => provider.structured(wire));
           const whole = unwrap(extractJson(res.raw));
           if (whole !== undefined) yield whole;
         }
@@ -358,7 +376,7 @@ export function createClient(opts: ClientOptions): Client {
     },
 
     async embed(req: EmbedRequest): Promise<EmbedResponse> {
-      const res = await aborting(req.signal, emptyUsage, () => capability("embed", "embeddings")(req));
+      const res = await billed(req.signal, emptyUsage, () => capability("embed", "embeddings")(req));
       await onUsage?.(res.usage, res.model);
       return { embeddings: res.embeddings, usage: res.usage, model: res.model };
     },
@@ -378,7 +396,7 @@ export function createClient(opts: ClientOptions): Client {
 
       // No native streaming on this provider → one non-streaming call, its whole text as one delta.
       if (!provider.textStream) {
-        const res = await aborting(req.signal, emptyUsage, () => provider.text(wire));
+        const res = await billed(req.signal, emptyUsage, () => provider.text(wire));
         await onUsage?.(res.usage, res.model);
         if (res.text) yield res.text;
         return { text: res.text, usage: res.usage, model: res.model };
@@ -398,12 +416,13 @@ export function createClient(opts: ClientOptions): Client {
       } catch (err) {
         // Same normalization as `aborting()` — but around iteration, so a mid-stream abort lands here too.
         if (req.signal?.aborted && !(err instanceof CoaxAbortError)) throw new CoaxAbortError(emptyUsage(), err);
+        await reportRefusal(err);
         throw err;
       }
     },
 
     async tools(req: ToolsRequest): Promise<ToolsResponse> {
-      const res = await aborting(req.signal, emptyUsage, () => capability("tools", "tool calling")(req));
+      const res = await billed(req.signal, emptyUsage, () => capability("tools", "tool calling")(req));
       await onUsage?.(res.usage, res.model);
       return res;
     },
@@ -411,7 +430,7 @@ export function createClient(opts: ClientOptions): Client {
     async *toolsStream(req: ToolsRequest): AsyncGenerator<string, ToolsResponse, void> {
       if (!provider.toolsStream) {
         // Non-streaming degrade — the turn still needs the tools capability to exist at all.
-        const res = await aborting(req.signal, emptyUsage, () => capability("tools", "tool calling")(req));
+        const res = await billed(req.signal, emptyUsage, () => capability("tools", "tool calling")(req));
         await onUsage?.(res.usage, res.model);
         return res;
       }
@@ -427,6 +446,7 @@ export function createClient(opts: ClientOptions): Client {
         return cur.value;
       } catch (err) {
         if (req.signal?.aborted && !(err instanceof CoaxAbortError)) throw new CoaxAbortError(emptyUsage(), err);
+        await reportRefusal(err);
         throw err;
       }
     },

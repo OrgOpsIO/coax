@@ -34,12 +34,37 @@ export interface ProviderEndpoint {
 }
 
 /**
- * How a provider is configured. Either:
- *  - an API key string (for the built-in `anthropic` / `openai` providers),
- *  - a {@link ProviderEndpoint} — the way to reach your own OpenAI-/Anthropic-compatible server, or
- *  - a factory `(model) => Provider` to plug in ANY provider (Gemini, a local model, a mock in tests).
+ * Gemini on Google's Agent Platform. Two credentials, one per provider: an Agent Platform `apiKey`
+ * (generate and stream only — no `embed`), or — without a key — Application Default Credentials for
+ * `project` (everything, incl. `embed`). Under any name other than `google`, set `api: "google"`.
  */
-export type ProviderConfig = string | ProviderEndpoint | ((model: string) => Provider);
+export interface GoogleEndpoint {
+  api?: "google";
+  /** Agent Platform API key. Mutually exclusive with `project`. */
+  apiKey?: string;
+  /** Google Cloud project for Application Default Credentials (the SDK falls back to `GOOGLE_CLOUD_PROJECT`). */
+  project?: string;
+  /** Default `"global"` — the newest models are not served from every region. */
+  location?: string;
+  /** Passed verbatim to Google's auth library, e.g. `{ credentials: serviceAccountJson }`. */
+  googleAuthOptions?: Record<string, unknown>;
+  /** Headers sent with every call to this endpoint. Per-call `headers` are merged over these. */
+  headers?: Record<string, string>;
+  /** Deep-merged into every request body (REST field names, e.g. `{ generationConfig: { temperature: 0.2 } }`),
+   *  under the per-call `extraBody`. */
+  extraBody?: Record<string, unknown>;
+  /** Model for `ai.embed()`. Default: the model of the reference (e.g. `google:gemini-embedding-001`). */
+  embedModel?: string;
+}
+
+/**
+ * How a provider is configured. Either:
+ *  - an API key string (for the built-in `anthropic` / `openai` / `google` providers),
+ *  - a {@link ProviderEndpoint} — the way to reach your own OpenAI-/Anthropic-compatible server,
+ *  - a {@link GoogleEndpoint} — Gemini with Application Default Credentials, a region, or a second name, or
+ *  - a factory `(model) => Provider` to plug in ANY provider (a local model, a mock in tests).
+ */
+export type ProviderConfig = string | ProviderEndpoint | GoogleEndpoint | ((model: string) => Provider);
 
 /**
  * A model alias resolves to `"provider:model"`, optionally with a fallback model on failure and a
@@ -62,7 +87,7 @@ export interface CallDefaults {
   maxRepairs?: number;
   maxTokens?: number;
   retries?: RetryConfig;
-  /** Cache the system prompt by default (Anthropic cache_control; no-op on OpenAI). */
+  /** Cache the system prompt by default (Anthropic cache_control; no-op on OpenAI and Google). */
   cache?: boolean;
   /** Cap on model turns in `ai.run()`. Default 8; `null` = unlimited (needs `budget` or `signal` — see
    *  `RunOptions.maxSteps`). */
@@ -86,8 +111,8 @@ export interface CallMeta {
 }
 
 export interface AIConfig {
-  /** Provider keys/endpoints/factories. Keys `anthropic` and `openai` work from a bare API key; any
-   *  other name needs `api` (compatible endpoint) or a factory. */
+  /** Provider keys/endpoints/factories. Keys `anthropic`, `openai` and `google` work from a bare API key;
+   *  any other name needs `api` (compatible endpoint, or `"google"`) or a factory. */
   providers: Record<string, ProviderConfig>;
   /** Named model aliases → "provider:model" (+ optional fallback). */
   models?: Record<string, ModelConfig>;

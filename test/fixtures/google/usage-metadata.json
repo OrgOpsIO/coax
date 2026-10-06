@@ -1,0 +1,13 @@
+{
+  "source": "Values VERBATIM from the Python SDK dump on https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/url-context (2026-10-06), CONVERTED from snake_case Python repr to the camelCase JSON field names of the REST/JS types (GenerateContentResponseUsageMetadata). Field semantics: Agent Platform REST reference https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/rest/v1/GenerateContentResponse — totalTokenCount = promptTokenCount + candidatesTokenCount + toolUsePromptTokenCount + thoughtsTokenCount (27 + 45 + 10309 + 31 = 10412); candidatesTokenCount excludes thinking; promptTokenCount includes cached tokens when cachedContent is set; toolUsePromptTokenCount = 'tokens in the results from tool executions, which are provided back to the model as input' (server-side tools like URL context, not coax function calls).",
+  "kind": "sdk-usageMetadata",
+  "fixture": {
+    "candidatesTokenCount": 45,
+    "promptTokenCount": 27,
+    "promptTokensDetails": [{ "modality": "TEXT", "tokenCount": 27 }],
+    "thoughtsTokenCount": 31,
+    "toolUsePromptTokenCount": 10309,
+    "toolUsePromptTokensDetails": [{ "modality": "TEXT", "tokenCount": 10309 }],
+    "totalTokenCount": 10412
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "source": "COMPOSED. Rules: function calls arrive as whole functionCall parts per chunk unless the Vertex-only streamFunctionCallArguments opt-in is set (SDK v2.27.0 FunctionCallingConfig / PartialArg); 'When streaming, this signature might be returned in a part with empty text content, so be sure to parse all parts until finish_reason is returned by the model.' (https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thought-signatures, 2026-10-06). Chunk envelope per stream-text.chunks.json. Values invented; 'c2lnLXRleHQ=' / 'c2lnLWNhbGw=' are stand-in base64 signatures.",
+  "kind": "sdk-generateContentStream-chunks",
+  "fixture": [
+    { "candidates": [{ "content": { "role": "model", "parts": [{ "text": "Ich schaue " }] }, "index": 0 }], "modelVersion": "gemini-3.5-flash" },
+    { "candidates": [{ "content": { "role": "model", "parts": [{ "text": "nach…", "thoughtSignature": "c2lnLXRleHQ=" }] }, "index": 0 }], "modelVersion": "gemini-3.5-flash" },
+    {
+      "candidates": [{ "content": { "role": "model", "parts": [{ "functionCall": { "id": "call-1", "name": "lookup", "args": { "q": "x" } }, "thoughtSignature": "c2lnLWNhbGw=" }] }, "index": 0 }],
+      "modelVersion": "gemini-3.5-flash"
+    },
+    {
+      "candidates": [{ "content": { "role": "model", "parts": [{ "text": "", "thoughtSignature": "c2lnLWVuZA==" }] }, "finishReason": "STOP", "index": 0 }],
+      "usageMetadata": { "promptTokenCount": 60, "candidatesTokenCount": 14, "thoughtsTokenCount": 90, "totalTokenCount": 164 },
+      "modelVersion": "gemini-3.5-flash"
+    }
+  ],
+  "expect": {
+    "deltas": ["Ich schaue ", "nach…"],
+    "text": "Ich schaue nach…",
+    "calls": [{ "id": "call-1", "name": "lookup", "input": { "q": "x" } }],
+    "note": "Every part (incl. the empty-text one carrying a signature) must survive into providerData in order, unmerged; no thought/signature content is yielded as a delta."
+  }
+}

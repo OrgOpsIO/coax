@@ -1,6 +1,7 @@
-import type { AIConfig, ProviderEndpoint, RetryConfig } from "./config";
+import type { AIConfig, GoogleEndpoint, ProviderEndpoint, RetryConfig } from "./config";
 import type { Provider, ReasoningEffort } from "./types";
 import { anthropic } from "./providers/anthropic";
+import { google } from "./providers/google";
 import { openai } from "./providers/openai";
 import { withRetry } from "./retry";
 
@@ -48,16 +49,31 @@ export function retrying(provider: Provider, cfg?: RetryConfig): Provider {
 export function createRegistry(config: AIConfig) {
   const cache = new Map<string, Provider>();
 
-  function fromEndpoint(providerName: string, spec: ProviderEndpoint, model: string): Provider {
+  function fromEndpoint(providerName: string, endpoint: ProviderEndpoint | GoogleEndpoint, model: string): Provider {
     // The provider NAME is free (`orgops`, `local`, …); `api` says which wire protocol to speak. It
-    // defaults to the built-in of the same name so `anthropic`/`openai` still work from a bare key.
-    const api = spec.api ?? (providerName === "anthropic" || providerName === "openai" ? providerName : undefined);
+    // defaults to the built-in of the same name so `anthropic`/`openai`/`google` still work from a bare key.
+    const api =
+      endpoint.api ?? (providerName === "anthropic" || providerName === "openai" || providerName === "google" ? providerName : undefined);
     if (!api) {
       throw new Error(
-        `coax: provider "${providerName}" needs \`api: "openai" | "anthropic"\` (for a compatible endpoint) or a factory ` +
-          `— only "anthropic" and "openai" are inferred from the name`,
+        `coax: provider "${providerName}" needs \`api: "openai" | "anthropic"\` (for a compatible endpoint), \`api: "google"\`, or a factory ` +
+          `— only "anthropic", "openai" and "google" are inferred from the name`,
       );
     }
+    if (api === "google") {
+      const g = endpoint as GoogleEndpoint;
+      return google({
+        model,
+        apiKey: g.apiKey,
+        project: g.project,
+        location: g.location,
+        googleAuthOptions: g.googleAuthOptions,
+        headers: g.headers,
+        extraBody: g.extraBody,
+        embedModel: g.embedModel,
+      });
+    }
+    const spec = endpoint as ProviderEndpoint;
     const common = { model, apiKey: spec.apiKey, baseURL: spec.baseURL, headers: spec.headers, extraBody: spec.extraBody };
     return api === "anthropic"
       ? anthropic(common)
