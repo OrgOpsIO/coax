@@ -22,7 +22,7 @@ function anthropicFake(replies: Record<string, unknown>[]) {
     messages: {
       create: async () => ({ usage, ...next() }),
       stream: () => {
-        const final = { usage, ...next() };
+        const final: Record<string, unknown> = { usage, ...next() };
         return {
           finalMessage: async () => final,
           async *[Symbol.asyncIterator]() {
