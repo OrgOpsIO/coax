@@ -48,6 +48,24 @@ describe("google: lazy SDK loading and constructor options (T2)", () => {
     expect(sdk.constructed.length).toBe(before);
   });
 
+  // Review R1.1: the SDK serves a key-without-project client from the global host and would drop these.
+  it("apiKey with a regional location or with googleAuthOptions rejects the call; no client is constructed", async () => {
+    const before = sdk.constructed.length;
+    const regional = createAI({ providers: { google: { apiKey: "k", location: "eu" } } });
+    await expect(regional.text({ model: "google:gemini-3.5-flash", prompt: "?" })).rejects.toThrow(
+      /apiKey from the "global" location only — location "eu" needs project/,
+    );
+    const sa = createAI({ providers: { google: { apiKey: "k", googleAuthOptions: { credentials: { client_email: "<SA_EMAIL>" } } } } });
+    await expect(sa.text({ model: "google:gemini-3.5-flash", prompt: "?" })).rejects.toThrow(/either apiKey .* or googleAuthOptions/);
+    expect(sdk.constructed.length).toBe(before);
+  });
+
+  it('apiKey with location "global" is what the key route does anyway, so it is accepted', async () => {
+    const ai = createAI({ providers: { google: { apiKey: "k", location: "global" } } });
+    await ai.text({ model: "google:gemini-3.5-flash", prompt: "?" });
+    expect(sdk.constructed.at(-1)).toEqual({ enterprise: true, apiKey: "k" });
+  });
+
   it("a provider constructs its client once and reuses it", async () => {
     const before = sdk.constructed.length;
     const ai = createAI({ providers: { google: "k" } });

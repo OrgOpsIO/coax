@@ -16,7 +16,8 @@ export interface ToolCall {
 }
 
 /**
- * How hard the model should think before answering. `"none"` turns thinking off outright — the biggest
+ * How hard the model should think before answering. `"none"` turns thinking off where the model can stop
+ * thinking, and asks for the least thinking it offers where it cannot (Gemini 3: `MINIMAL`) — the biggest
  * lever for cutting latency/cost on calls that don't need it (classification, reformatting). Not every
  * endpoint understands this; it is only sent on the wire where explicitly set (see BaseRequest.reasoningEffort).
  */
@@ -165,7 +166,7 @@ export interface EmbedRequest {
   input: string | string[];
   headers?: Record<string, string>;
   signal?: AbortSignal;
-  /** Merged flat into the wire body, last — same contract as `BaseRequest.extraBody`. */
+  /** Merged into the wire body, last (flat; deep on Google) — same contract as `BaseRequest.extraBody`. */
   extraBody?: Record<string, unknown>;
 }
 

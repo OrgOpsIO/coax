@@ -91,7 +91,7 @@ export interface ObjectRequest<T> {
   maxTokens?: number;
   /** How many reprompt-on-validation-failure rounds. Default 2. */
   maxRepairs?: number;
-  /** Cache the system prompt at the provider (Anthropic cache_control; no-op on OpenAI). */
+  /** Cache the system prompt at the provider (Anthropic cache_control; no-op on OpenAI and Google). */
   cache?: boolean;
   /** Mark the conversation-so-far as reusable for the loop's next call. See `BaseRequest.cacheConversation`. */
   cacheConversation?: boolean;
@@ -101,7 +101,7 @@ export interface ObjectRequest<T> {
   signal?: AbortSignal;
   /** How hard the model should think. Sent on the wire only when set. See `BaseRequest.reasoningEffort`. */
   reasoningEffort?: ReasoningEffort;
-  /** Merged flat into the wire body, last — MAY override coax's own fields. See `BaseRequest.extraBody`. */
+  /** Merged into the wire body, last (flat; deep on Google) — MAY override coax's own fields. See `BaseRequest.extraBody`. */
   extraBody?: Record<string, unknown>;
 }
 

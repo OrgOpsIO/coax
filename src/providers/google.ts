@@ -24,9 +24,10 @@ export interface GoogleOptions {
   apiKey?: string;
   /** Google Cloud project for Application Default Credentials (the route used when no `apiKey` is set). */
   project?: string;
-  /** Agent Platform location, e.g. "global", "eu", "europe-west4". Default "global". */
+  /** Agent Platform location, e.g. "global", "eu", "europe-west4". Default "global". With `apiKey`, only
+   *  "global" — a key is served from there, so any other location is a config error, not dropped. */
   location?: string;
-  /** Passed verbatim to the SDK's auth (e.g. `{ credentials: serviceAccountJson }`). */
+  /** Passed verbatim to the SDK's auth (e.g. `{ credentials: serviceAccountJson }`). Not with `apiKey`. */
   googleAuthOptions?: Record<string, unknown>;
   /** Inject an existing SDK client; otherwise coax lazily constructs one (the SDK ships inside coax). */
   client?: GoogleGenAI;
@@ -35,7 +36,7 @@ export interface GoogleOptions {
   headers?: Record<string, string>;
   /** Deep-merged into every request body (REST field names), under the per-call `extraBody`. */
   extraBody?: Record<string, unknown>;
-  /** Model for `embed()`. Default: the model of the reference itself (e.g. `google:gemini-embedding-001`). */
+  /** Model for `embed()`, over the reference's when set. Default: the model of the reference itself (e.g. `google:gemini-embedding-001`). */
   embedModel?: string;
 }
 
@@ -241,6 +242,18 @@ export function google(opts: GoogleOptions): Provider {
   if (opts.apiKey && opts.project) {
     throw new Error(
       'coax: provider "google" needs either apiKey (Agent Platform API key) or project (Application Default Credentials), not both',
+    );
+  }
+  // The SDK serves every key-without-project client from the global host, whatever location it is given —
+  // a region is data residency, so dropping it silently would change what the caller configured.
+  if (opts.apiKey && opts.location !== undefined && opts.location !== "global") {
+    throw new Error(
+      `coax: provider "google" serves an apiKey from the "global" location only — location "${opts.location}" needs project (Application Default Credentials) instead of apiKey`,
+    );
+  }
+  if (opts.apiKey && opts.googleAuthOptions) {
+    throw new Error(
+      'coax: provider "google" needs either apiKey (Agent Platform API key) or googleAuthOptions (Google auth library credentials), not both',
     );
   }
   let client: AnyClient | undefined = opts.client as unknown as AnyClient | undefined;

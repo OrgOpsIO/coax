@@ -174,23 +174,26 @@ configure({
 
 An API key reaches generation only — text, structured output, streaming, tools. Embeddings need the
 `{ project }` form; on a key-only provider `ai.embed()` raises `CoaxUnsupportedError`. `location` defaults
-to `"global"`, where the newest models are served. Naming both `apiKey` and `project` is a config error,
-not a guess about which one you meant.
+to `"global"`, where the newest models are served. A key is served from `"global"` only, so a region
+(data residency) needs the `{ project }` form. Naming `apiKey` together with `project`, `googleAuthOptions`
+or a location other than `"global"` is a config error, not a guess about which one you meant.
 
 What to know, briefly:
 
 - **Structured output** uses Gemini's native JSON-schema mode. Its grammar does not enforce everything
   Zod can say — string lengths, `pattern`/`.regex()`, `.gt()`/`.lt()`, `multipleOf`, intersections
   (`allOf`), records, `default`, formats other than date/time, boolean literals; for tool arguments also
-  `additionalProperties`, array lengths and number bounds. coax leaves those out of what it sends and
-  still validates and repairs the result against your schema. `z.literal()` tags go out as enums, so
-  discriminated unions stay grammar-checked.
+  `additionalProperties`, tuples (`prefixItems`), `title`, array lengths and number bounds. coax leaves
+  those out of what it sends and still validates and repairs the result against your schema.
+  `z.literal()` tags go out as enums, so discriminated unions stay grammar-checked.
 - **Thought signatures** round-trip automatically on `ai.run()`: the model's turn rides verbatim on
   `Message.providerData` (persist it with the transcript), like Anthropic's thinking blocks. A transcript
   written by another provider (a fallback mid-run, a resumed conversation) continues on Gemini with
   Google's documented placeholder signature.
 - **`reasoningEffort`** maps to Gemini's `thinkingLevel`. Gemini 3 cannot stop thinking: `"none"` sends
-  `MINIMAL` — the lowest level Gemini allows, not off — and models without it reject the call.
+  `MINIMAL` — the lowest level Gemini allows, not off — and models without it reject the call. Not yet
+  measured: Google documents that `MINIMAL` needs thought signatures in multi-turn conversations, and a
+  repair round or a chat history carries none on text turns — if such calls fail on your model, use `"low"`.
 - **`extraBody`** merges *deep* on Google and uses the REST field names, because every generation knob
   sits under `generationConfig`: `extraBody: { generationConfig: { temperature: 0.2 } }` sets the
   temperature without wiping coax's own settings.
@@ -571,8 +574,8 @@ configure({
 const { embeddings } = await ai.embed({ model: "vectors", input: chunks });  // one vector per chunk, in order
 ```
 
-On Google the model reference names the embedding model itself — no `embedModel` needed — but only the
-Application Default Credentials form reaches it:
+On Google the model reference names the embedding model itself — no `embedModel` needed (if an endpoint
+sets one anyway, it wins over the reference) — but only the Application Default Credentials form reaches it:
 
 ```ts
 configure({ providers: { google: { project: "my-project" } } });

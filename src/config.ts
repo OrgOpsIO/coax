@@ -40,20 +40,22 @@ export interface ProviderEndpoint {
  */
 export interface GoogleEndpoint {
   api?: "google";
-  /** Agent Platform API key. Mutually exclusive with `project`. */
+  /** Agent Platform API key. Mutually exclusive with `project` and `googleAuthOptions`, and served from
+   *  the `"global"` location only — any other `location` with a key is a config error. */
   apiKey?: string;
   /** Google Cloud project for Application Default Credentials (the SDK falls back to `GOOGLE_CLOUD_PROJECT`). */
   project?: string;
-  /** Default `"global"` — the newest models are not served from every region. */
+  /** Default `"global"` — the newest models are not served from every region. A region needs `project`. */
   location?: string;
-  /** Passed verbatim to Google's auth library, e.g. `{ credentials: serviceAccountJson }`. */
+  /** Passed verbatim to Google's auth library, e.g. `{ credentials: serviceAccountJson }`. Not with `apiKey`. */
   googleAuthOptions?: Record<string, unknown>;
   /** Headers sent with every call to this endpoint. Per-call `headers` are merged over these. */
   headers?: Record<string, string>;
   /** Deep-merged into every request body (REST field names, e.g. `{ generationConfig: { temperature: 0.2 } }`),
    *  under the per-call `extraBody`. */
   extraBody?: Record<string, unknown>;
-  /** Model for `ai.embed()`. Default: the model of the reference (e.g. `google:gemini-embedding-001`). */
+  /** Model for `ai.embed()`. Default: the model of the reference (e.g. `google:gemini-embedding-001`).
+   *  When set, it wins over the reference for every embed through this endpoint (as on the OpenAI wire). */
   embedModel?: string;
 }
 

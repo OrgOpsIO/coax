@@ -154,6 +154,13 @@ describe("google registry and config (T3)", () => {
     await expect(ai.text({ model: "google:m", prompt: "?" })).rejects.toThrow(/either apiKey .* or project/);
   });
 
+  it("apiKey with a regional location or googleAuthOptions is a config mistake too, also with an injected client (review R1.1)", () => {
+    const { client } = fake();
+    expect(() => google({ model: "m", apiKey: "k", location: "europe-west4", client })).toThrow(/location "europe-west4" needs project/);
+    expect(() => google({ model: "m", apiKey: "k", googleAuthOptions: {}, client })).toThrow(/either apiKey .* or googleAuthOptions/);
+    expect(google({ model: "m", apiKey: "k", location: "global", client }).name).toBe("google");
+  });
+
   it("the old and the new config forms all type-check as AIConfig", () => {
     const configs = [
       { providers: { google: "k" } },
