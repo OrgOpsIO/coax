@@ -1,0 +1,39 @@
+{
+  "source": "COMPOSED — the next turn after tools-parallel.response.json, as the SDK params a provider would pass. Rules applied, each sourced: model turn replayed with its parts unmerged and the signature on the first functionCall part (https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thought-signatures: 'Don't merge a Part containing a signature with one that does not'); functionResponse carries the call's `id` (https://ai.google.dev/gemini-api/docs/generate-content/function-calling); results in ONE role:\"user\" Content (Agent Platform REST examples); `response` is an object using the documented 'output' / 'error' keys (SDK v2.27.0 FunctionResponse.response doc: 'Use \"output\" key to specify function output and \"error\" key to specify error details'); a string tool output therefore rides as {output: \"…\"}. tools as functionDeclarations with parametersJsonSchema (SDK FunctionDeclaration); toolChoice \"auto\" → mode AUTO (SDK FunctionCallingConfigMode). The second result is a coax ToolResult with isError: true.",
+  "kind": "sdk-generateContent-params",
+  "fixture": {
+    "model": "gemini-3.5-flash",
+    "contents": [
+      { "role": "user", "parts": [{ "text": "Is it warmer in Paris or London?" }] },
+      {
+        "role": "model",
+        "parts": [
+          { "functionCall": { "id": "call-paris-1", "name": "get_current_temperature", "args": { "location": "Paris" } }, "thoughtSignature": "<SIGNATURE_A>" },
+          { "functionCall": { "id": "call-london-2", "name": "get_current_temperature", "args": { "location": "London" } } }
+        ]
+      },
+      {
+        "role": "user",
+        "parts": [
+          { "functionResponse": { "id": "call-paris-1", "name": "get_current_temperature", "response": { "output": { "celsius": 21 } } } },
+          { "functionResponse": { "id": "call-london-2", "name": "get_current_temperature", "response": { "error": "The tool \"get_current_temperature\" failed: upstream timeout" } } }
+        ]
+      }
+    ],
+    "config": {
+      "maxOutputTokens": 8192,
+      "tools": [
+        {
+          "functionDeclarations": [
+            {
+              "name": "get_current_temperature",
+              "description": "Current temperature for a city.",
+              "parametersJsonSchema": { "type": "object", "properties": { "location": { "type": "string" } }, "required": ["location"], "additionalProperties": false }
+            }
+          ]
+        }
+      ],
+      "toolConfig": { "functionCallingConfig": { "mode": "AUTO" } }
+    }
+  }
+}

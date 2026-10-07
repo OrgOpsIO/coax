@@ -1,0 +1,12 @@
+{
+  "source": "COMPOSED from @google/genai v2.27.0 src/types.ts: EmbedContentParameters { model, contents, config?: EmbedContentConfig { taskType, title, outputDimensionality, autoTruncate*, mimeType* } }, EmbedContentResponse { embeddings?: ContentEmbedding[] ('in the same order as provided in the batch request'), metadata?: { billableCharacterCount } }, ContentEmbedding { values, statistics?: { tokenCount, truncated } } (* / statistics / metadata: Agent Platform only). SDK routing (src/_transformers.ts tIsVertexEmbedContentModel): gemini-embedding-001 and text-embedding-* → :predict; other gemini* (e.g. gemini-embedding-2) → :embedContent which throws 'The embedContent API for this model only supports one content at a time.' for >1 content. Shown: ONE call per input (the safe pattern for every Google embedding model). Values invented.",
+  "kind": "sdk-embedContent-params-and-response",
+  "fixture": {
+    "params": { "model": "gemini-embedding-001", "contents": ["first chunk"], "config": { "outputDimensionality": 3 } },
+    "response": {
+      "embeddings": [{ "values": [0.12, -0.03, 0.88], "statistics": { "tokenCount": 3, "truncated": false } }],
+      "metadata": { "billableCharacterCount": 10 }
+    },
+    "tooManyContentsError": { "thrownBy": "SDK before the wire, for gemini-embedding-2 with 2 contents", "message": "The embedContent API for this model only supports one content at a time." }
+  }
+}

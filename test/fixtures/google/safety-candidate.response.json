@@ -1,0 +1,24 @@
+{
+  "source": "EXCERPT (values verbatim, not complete) from https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/configure-safety-filters (2026-10-06; corrected 2026-10-07 after measurement D1): keeps 2 of the example's 4 safetyRatings and leaves out its usageMetadata { promptTokenCount: 38, totalTokenCount: 38 }, which test/google.test.ts adds back where usage is asserted. Candidate stopped by the safety filter: finishReason SAFETY, the offending rating has blocked: true, no content. Related finish reasons that also mean 'output withheld by a filter' (Agent Platform FinishReason): PROHIBITED_CONTENT, BLOCKLIST, SPII, IMAGE_SAFETY, IMAGE_PROHIBITED_CONTENT, MODEL_ARMOR; RECITATION/LANGUAGE stop output for non-safety reasons.",
+  "kind": "sdk-generateContent-response",
+  "fixture": {
+    "candidates": [{
+      "finishReason": "SAFETY",
+      "safetyRatings": [{
+        "category": "HARM_CATEGORY_HATE_SPEECH",
+        "probability": "NEGLIGIBLE",
+        "probabilityScore": 0.11027937,
+        "severity": "HARM_SEVERITY_LOW",
+        "severityScore": 0.28487435
+      }, {
+        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+        "probability": "HIGH",
+        "blocked": true,
+        "probabilityScore": 0.95422274,
+        "severity": "HARM_SEVERITY_MEDIUM",
+        "severityScore": 0.43398145
+      }]
+    }]
+  },
+  "expect": { "error": "CoaxRefusalError", "category": "SAFETY" }
+}

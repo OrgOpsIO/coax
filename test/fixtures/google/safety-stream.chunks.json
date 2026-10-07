@@ -1,0 +1,12 @@
+{
+  "source": "COMPOSED. A stream that yields text and is then stopped by the safety filter on a later chunk (finishReason SAFETY arrives with the last chunk; 'finishReason … If empty, the model has not stopped generating' — Agent Platform GenerateContentResponse reference). Proves a mid-stream block surfaces as CoaxRefusalError through the iteration/result, not as a successful short answer. Values invented.",
+  "kind": "sdk-generateContentStream-chunks",
+  "fixture": [
+    { "candidates": [{ "content": { "role": "model", "parts": [{ "text": "Here is how " }] }, "index": 0 }] },
+    {
+      "candidates": [{ "finishReason": "SAFETY", "finishMessage": "Response stopped by the safety filter.", "index": 0, "safetyRatings": [{ "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "probability": "HIGH", "blocked": true }] }],
+      "usageMetadata": { "promptTokenCount": 12, "candidatesTokenCount": 3, "totalTokenCount": 15 }
+    }
+  ],
+  "expect": { "deltasBeforeError": ["Here is how "], "error": "CoaxRefusalError", "category": "SAFETY" }
+}

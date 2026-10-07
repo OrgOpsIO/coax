@@ -17,7 +17,7 @@ export interface ObjectCall<T> {
   messages?: Message[];
   maxTokens?: number;
   maxRepairs?: number;
-  /** Cache the system prompt (Anthropic cache_control; no-op on OpenAI). */
+  /** Cache the system prompt (Anthropic cache_control; no-op on OpenAI and Google). */
   cache?: boolean;
   /** Mark the conversation-so-far as reusable for the loop's next call. See `BaseRequest.cacheConversation`. */
   cacheConversation?: boolean;
@@ -29,7 +29,7 @@ export interface ObjectCall<T> {
   purpose?: string;
   /** How hard the model should think. Precedence: here > the model alias > `defaults.reasoningEffort`. */
   reasoningEffort?: ReasoningEffort;
-  /** Merged flat into the wire body, last — MAY override coax's own fields. See `BaseRequest.extraBody`. */
+  /** Merged into the wire body, last (flat; deep on Google) — MAY override coax's own fields. See `BaseRequest.extraBody`. */
   extraBody?: Record<string, unknown>;
 }
 
@@ -47,7 +47,7 @@ export interface TextCall {
   purpose?: string;
   /** How hard the model should think. Precedence: here > the model alias > `defaults.reasoningEffort`. */
   reasoningEffort?: ReasoningEffort;
-  /** Merged flat into the wire body, last — MAY override coax's own fields. See `BaseRequest.extraBody`. */
+  /** Merged into the wire body, last (flat; deep on Google) — MAY override coax's own fields. See `BaseRequest.extraBody`. */
   extraBody?: Record<string, unknown>;
 }
 
@@ -83,7 +83,7 @@ export interface EmbedCall {
   headers?: Record<string, string>;
   signal?: AbortSignal;
   purpose?: string;
-  /** Merged flat into the wire body, last — same contract as `BaseRequest.extraBody`. */
+  /** Merged into the wire body, last (flat; deep on Google) — same contract as `BaseRequest.extraBody`. */
   extraBody?: Record<string, unknown>;
 }
 
@@ -130,7 +130,7 @@ export interface RunCall<C = unknown, T = unknown> extends Omit<RunOptions<C, T>
   purpose?: string;
   /** How hard the model should think. Precedence: here > the model alias > `defaults.reasoningEffort`. */
   reasoningEffort?: ReasoningEffort;
-  /** Merged flat into the wire body, last — MAY override coax's own fields. See `BaseRequest.extraBody`. */
+  /** Merged into the wire body, last (flat; deep on Google) — MAY override coax's own fields. See `BaseRequest.extraBody`. */
   extraBody?: Record<string, unknown>;
 }
 

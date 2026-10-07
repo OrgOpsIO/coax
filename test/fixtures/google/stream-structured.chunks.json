@@ -1,0 +1,14 @@
+{
+  "source": "COMPOSED. Same chunk shape as stream-text.chunks.json; with responseMimeType application/json the JSON text arrives as text-part fragments (structured output is text, see structured.response.json). Fragment boundaries invented.",
+  "kind": "sdk-generateContentStream-chunks",
+  "fixture": [
+    { "candidates": [{ "content": { "role": "model", "parts": [{ "text": "{\"title\": \"Ty" }] }, "index": 0 }], "modelVersion": "gemini-3.5-flash" },
+    { "candidates": [{ "content": { "role": "model", "parts": [{ "text": "pes\", \"tags\": [\"ts\"" }] }, "index": 0 }], "modelVersion": "gemini-3.5-flash" },
+    {
+      "candidates": [{ "content": { "role": "model", "parts": [{ "text": "], \"kind\": \"article\"}" }] }, "finishReason": "STOP", "index": 0 }],
+      "usageMetadata": { "promptTokenCount": 30, "candidatesTokenCount": 17, "totalTokenCount": 47 },
+      "modelVersion": "gemini-3.5-flash"
+    }
+  ],
+  "expect": { "raw": "{\"title\": \"Types\", \"tags\": [\"ts\"], \"kind\": \"article\"}" }
+}

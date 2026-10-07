@@ -1,0 +1,11 @@
+{
+  "source": "Agent Platform thought-signatures page, sequential function calling, step-2 history, https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thought-signatures (2026-10-06). Content VERBATIM; the page's surplus braces were removed. Shows: every sequential step's functionCall carries its own signature and ALL must be sent back ('you must pass all signatures back'); omitting the one on the first functionCall part of a step → 400 on Gemini 3.",
+  "kind": "rest-generateContent-contents",
+  "fixture": [
+    { "role": "user", "parts": [{ "text": "Check flight status for AA100 and book a taxi 2 hours before if delayed." }] },
+    { "role": "model", "parts": [{ "functionCall": { "name": "check_flight", "args": { "flight": "AA100" } }, "thoughtSignature": "<SIGNATURE_A>" }] },
+    { "role": "user", "parts": [{ "functionResponse": { "name": "check_flight", "response": { "status": "delayed", "departure_time": "12 PM" } } }] },
+    { "role": "model", "parts": [{ "functionCall": { "name": "book_taxi", "args": { "time": "10 AM" } }, "thoughtSignature": "<SIGNATURE_B>" }] },
+    { "role": "user", "parts": [{ "functionResponse": { "name": "book_taxi", "response": { "booking_status": "success" } } }] }
+  ]
+}

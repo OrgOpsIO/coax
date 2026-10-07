@@ -1,0 +1,13 @@
+{
+  "source": "COMPOSED. A coax transcript whose tool-call turn was produced by ANOTHER provider (Anthropic/OpenAI history, or a coax model fallback mid-run) carries no Google signature. Gemini 3 rejects a functionCall step without one ('omitting a required thought_signature for the first functionCall part in any step of the current turn results in a 400 error'); the Agent Platform documents the dummy value for exactly this case: 'skip_thought_signature_validator' — '…this should be a last resort as it will negatively impact model performance.' (https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thought-signatures, 2026-10-06). The Gemini Developer API additionally accepts 'context_engineering_is_the_way_to_go' (https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures). Whether coax applies the dummy is the architect's decision; this fixture shows the shape if it does. Tool ids from the foreign provider ('toolu_01…') are echoed as functionResponse.id — whether the service accepts ids it did not issue is UNVERIFIED.",
+  "kind": "sdk-generateContent-params",
+  "fixture": {
+    "model": "gemini-3.5-flash",
+    "contents": [
+      { "role": "user", "parts": [{ "text": "?" }] },
+      { "role": "model", "parts": [{ "functionCall": { "id": "toolu_01", "name": "lookup", "args": {} }, "thoughtSignature": "skip_thought_signature_validator" }] },
+      { "role": "user", "parts": [{ "functionResponse": { "id": "toolu_01", "name": "lookup", "response": { "output": "42" } } }] }
+    ],
+    "config": { "tools": [{ "functionDeclarations": [{ "name": "lookup", "description": "Look something up.", "parametersJsonSchema": { "type": "object", "properties": {} } }] }] }
+  }
+}

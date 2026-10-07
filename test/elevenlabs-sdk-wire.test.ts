@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { createAI } from "../src/ai";
 import { CoaxAbortError, CoaxUnsupportedError } from "../src/client";
 import { elevenlabs } from "../src/providers/elevenlabs";
@@ -51,6 +51,11 @@ const audioReply = (headers: Record<string, string> = { "character-cost": TTS_RE
 
 const VOICE = TTS_REQ.fixture.sdkCall.voiceId as string;
 const zeros = emptyUsage();
+
+// The SDK is 23k files; its cold import under a parallel full suite can exceed one test's 5 s on its own.
+beforeAll(async () => {
+  await import("@elevenlabs/elevenlabs-js");
+}, 60_000);
 
 describe("elevenlabs speak through the real SDK", () => {
   it("sends the measured wire: voice in the path, output_format in the query, key header, JSON body", async () => {

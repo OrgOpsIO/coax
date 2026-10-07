@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createAI } from "../src/ai";
 import { elevenlabs } from "../src/providers/elevenlabs";
 
@@ -27,6 +27,11 @@ function stubGlobalFetch() {
 afterEach(() => {
   vi.unstubAllGlobals();
 });
+
+// The SDK is 23k files; its cold import under a parallel full suite can exceed one test's 5 s on its own.
+beforeAll(async () => {
+  await import("@elevenlabs/elevenlabs-js");
+}, 60_000);
 
 describe("elevenlabs endpoint config reaches the wire through the registry (real SDK)", () => {
   it("the endpoint's voice is the voice of ai.speak(); a per-call voice wins", async () => {

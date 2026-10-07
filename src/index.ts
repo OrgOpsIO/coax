@@ -3,7 +3,7 @@ export { configure, ai, isConfigured, reset } from "./runtime";
 // Explicit instance (recommended for libraries, tests, multiple configs).
 export { createAI } from "./ai";
 export type { AI, ObjectCall, TextCall, TextStream, ObjectStream, RunStream, DeepPartial, JudgeCall, Judgement, RunCall, EmbedCall, TranscribeCall, SpeakCall } from "./ai";
-export type { AIConfig, ProviderConfig, ProviderEndpoint, ElevenLabsEndpoint, ModelConfig, RetryConfig, CallDefaults, CallMeta } from "./config";
+export type { AIConfig, ProviderConfig, ProvidersConfig, ProviderEndpoint, GoogleEndpoint, ElevenLabsEndpoint, ModelConfig, RetryConfig, CallDefaults, CallMeta } from "./config";
 export { parsePrompt, renderTemplate } from "./prompt-file";
 export type { ParsedPrompt, PromptMeta } from "./prompt-file";
 
@@ -22,11 +22,13 @@ export type { LoopOptions, LoopControl } from "./loop";
 export { createBudget } from "./budget";
 export type { Budget } from "./budget";
 
-// Providers. Both double as adapters for any endpoint speaking their wire protocol.
+// Providers. Anthropic and OpenAI double as adapters for any endpoint speaking their wire protocol.
 export { anthropic } from "./providers/anthropic";
 export type { AnthropicOptions } from "./providers/anthropic";
 export { openai } from "./providers/openai";
 export type { OpenAiOptions } from "./providers/openai";
+export { google } from "./providers/google";
+export type { GoogleOptions } from "./providers/google";
 // Voice only: speech synthesis and transcription.
 export { elevenlabs } from "./providers/elevenlabs";
 export type { ElevenLabsOptions } from "./providers/elevenlabs";
@@ -34,7 +36,7 @@ export type { ElevenLabsOptions } from "./providers/elevenlabs";
 // Building blocks / types.
 export { extractJson } from "./parse";
 export { toProviderSchema, formatIssues, safeParse } from "./schema";
-export { addUsage, emptyUsage, CoaxRefusalError } from "./types";
+export { addUsage, emptyUsage, billedUsage, withBilledUsage, CoaxRefusalError } from "./types";
 export type {
   AudioFormat,
   AudioInput,

@@ -1,0 +1,23 @@
+{
+  "source": "COMPOSED. Parameter shape from @google/genai v2.27.0 src/types.ts GenerateContentParameters / GenerateContentConfig (responseMimeType, responseJsonSchema — 'If set, response_schema must be omitted, but response_mime_type is required'). The schema is what coax's toProviderSchema() produces for z.object({ title: z.string().min(1), tags: z.array(z.string()).min(1), kind: z.literal(\"article\") }) per the Zod 4.4.3 processors (node_modules/zod/v4/core/json-schema-processors.js) — note `const` and `minLength`, which are NOT in Google's supported keyword list (see decisions/stage-01-facts.md §4).",
+  "kind": "sdk-generateContent-params",
+  "fixture": {
+    "model": "gemini-3.5-flash",
+    "contents": [{ "role": "user", "parts": [{ "text": "Label this article: …" }] }],
+    "config": {
+      "systemInstruction": "You label articles.",
+      "maxOutputTokens": 8192,
+      "responseMimeType": "application/json",
+      "responseJsonSchema": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string", "minLength": 1 },
+          "tags": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "kind": { "type": "string", "const": "article" }
+        },
+        "required": ["title", "tags", "kind"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

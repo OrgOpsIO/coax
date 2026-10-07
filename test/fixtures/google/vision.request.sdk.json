@@ -1,0 +1,17 @@
+{
+  "source": "COMPOSED from @google/genai v2.27.0 src/types.ts Part.inlineData: Blob { mimeType, data /* base64 */ } and the Agent Platform inference reference https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/models/inference (2026-10-06): image/png, image/jpeg, image/webp and application/pdf accepted inline; 'Size limit: 7 MB for images'; up to 10 images per request; documents ≤ 15 MB. Maps 1:1 from coax Media { kind, mediaType, dataBase64 } (PDF included). `data` is a 1×1 PNG.",
+  "kind": "sdk-generateContent-params",
+  "fixture": {
+    "model": "gemini-3.5-flash",
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          { "text": "Extract the fields." },
+          { "inlineData": { "mimeType": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" } },
+          { "inlineData": { "mimeType": "application/pdf", "data": "JVBERi0xLjQK" } }
+        ]
+      }
+    ]
+  }
+}

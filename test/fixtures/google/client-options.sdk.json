@@ -1,0 +1,38 @@
+{
+  "source": "@google/genai v2.27.0 src/client.ts GoogleGenAIOptions (enterprise, vertexai, project, location, apiKey, apiVersion, googleAuthOptions, httpOptions) and src/node/node_client.ts / src/_api_client.ts (base-URL and precedence rules). Agent Platform auth: https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/authentication ('Agent Platform supports API keys for the following API methods: generateContent and streamGenerateContent'), https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start ('ADC is the recommended method'). All 2026-10-06. Placeholders only — no real project ids or keys.",
+  "kind": "sdk-constructor-options",
+  "fixture": {
+    "apiKeyRoute": {
+      "options": { "enterprise": true, "apiKey": "<AGENT_PLATFORM_API_KEY>" },
+      "baseUrl": "https://aiplatform.googleapis.com/",
+      "path": "v1beta1/publishers/google/models/gemini-3.5-flash:generateContent",
+      "authHeader": "x-goog-api-key",
+      "reaches": ["generateContent", "streamGenerateContent"]
+    },
+    "adcGlobal": {
+      "options": { "enterprise": true, "project": "<PROJECT_ID>", "location": "global" },
+      "baseUrl": "https://aiplatform.googleapis.com/",
+      "path": "v1beta1/projects/<PROJECT_ID>/locations/global/publishers/google/models/gemini-3.5-flash:generateContent",
+      "authHeader": "Authorization: Bearer <ADC access token, scope https://www.googleapis.com/auth/cloud-platform>",
+      "reaches": ["generateContent", "streamGenerateContent", "embedContent/predict", "caches", "countTokens"]
+    },
+    "adcRegional": {
+      "options": { "enterprise": true, "project": "<PROJECT_ID>", "location": "europe-west4" },
+      "baseUrl": "https://europe-west4-aiplatform.googleapis.com/"
+    },
+    "adcMultiRegion": {
+      "options": { "enterprise": true, "project": "<PROJECT_ID>", "location": "eu" },
+      "baseUrl": "https://aiplatform.eu.rep.googleapis.com/"
+    },
+    "adcServiceAccountJson": {
+      "options": { "enterprise": true, "project": "<PROJECT_ID>", "location": "global", "googleAuthOptions": { "credentials": { "client_email": "<SA_EMAIL>", "private_key": "<PEM>" } } },
+      "note": "googleAuthOptions.credentials beats apiKey (apiKey is then cleared)."
+    },
+    "defaults": {
+      "location": "'global' when neither location nor apiKey is given",
+      "apiVersion": "v1beta1 (VERTEX_AI_API_DEFAULT_VERSION); override with apiVersion: 'v1'",
+      "retries": "none unless httpOptions.retryOptions is set",
+      "throwsWithout": "project+location, apiKey or a custom baseUrl → 'Authentication is not set up. Please provide either a project and location, or an API key, or a custom base URL.'"
+    }
+  }
+}

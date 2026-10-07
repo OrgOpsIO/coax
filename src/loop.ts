@@ -1,7 +1,7 @@
 import type { ZodType } from "zod";
-import { addUsage, emptyUsage, type Message, type Usage } from "./types";
+import { addUsage, billedUsage, emptyUsage, type Message, type Usage } from "./types";
 import type { Budget } from "./budget";
-import { CoaxAbortError, type ObjectResult } from "./client";
+import { CoaxAbortError, CoaxSchemaError, type ObjectResult } from "./client";
 
 /** What `onStep` returns: stop with a value, or continue (optionally appending the next user message). */
 export type LoopControl<R> = { done: true; value: R } | { done: false; reply?: string | Message[] };
@@ -71,6 +71,10 @@ export async function runLoop<T, R>(object: ObjectFn, opts: LoopOptions<T, R>): 
         system: opts.system, cache: opts.cache, cacheConversation: opts.cacheConversation, messages, signal: opts.signal, purpose: opts.purpose,
       }));
     } catch (err) {
+      // A turn that failed after it was billed still counts toward the budget, like a failed turn of
+      // `ai.run()`: every round of a CoaxSchemaError, or what the failed call was billed (`billedUsage`).
+      const billed = err instanceof CoaxSchemaError ? err.usage : billedUsage(err);
+      if (billed) opts.budget?.record(billed);
       // An abort mid-call carries only that call's usage — add what this loop spent before it.
       throw err instanceof CoaxAbortError ? new CoaxAbortError(addUsage(usage, err.usage), err) : err;
     }
