@@ -201,8 +201,9 @@ export interface SpeakRequest {
   speed?: number;
   /** Free-form delivery instruction (tone, pace, emotion). Not on ElevenLabs (CoaxUnsupportedError). */
   instructions?: string;
-  /** Language hint, ISO-639-1 (e.g. "de"). Sent where the service takes one (ElevenLabs); the OpenAI
-   *  speech endpoint has no such field and reads the language from `input`. */
+  /** Language hint, ISO-639-1 (e.g. "de"). Sent where the service takes one (ElevenLabs — whose models
+   *  ignore a language they don't support; `eleven_multilingual_v2` takes none); the OpenAI speech endpoint
+   *  has no such field and reads the language from `input`. */
   language?: string;
   headers?: Record<string, string>;
   signal?: AbortSignal;

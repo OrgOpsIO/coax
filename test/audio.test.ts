@@ -156,6 +156,13 @@ describe("openai wire: endpoint voice, language, speakers, whisper seconds", () 
     expect(fake.speech.map((b) => b.voice)).toEqual(["de-female", "nova", "alloy"]);
   });
 
+  it("a voice of \"\" counts as no voice, per call and on the endpoint, as on ElevenLabs (review R2.7)", async () => {
+    const fake = fakeOpenaiAudio();
+    await openai({ model: "tts-x", client: fake.client, voice: "de-female" }).speak!({ input: "Hallo", voice: "" });
+    await openai({ model: "tts-x", client: fake.client, voice: "" }).speak!({ input: "Hallo" });
+    expect(fake.speech.map((b) => b.voice)).toEqual(["de-female", "alloy"]);
+  });
+
   it("the registry hands an endpoint's voice to the OpenAI wire", async () => {
     const bodies: Record<string, unknown>[] = [];
     vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {

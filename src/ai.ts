@@ -91,7 +91,7 @@ export interface TranscribeCall {
   model?: string;
   /** The audio bytes. A browser upload's Blob/File works directly. */
   audio: AudioInput;
-  /** ISO-639-1 hint, e.g. "de". */
+  /** Language hint, ISO-639-1, e.g. "de" (ElevenLabs also takes ISO-639-3). See `TranscribeRequest.language`. */
   language?: string;
   /** Context hint — domain vocabulary, names, expected spelling. Not on ElevenLabs (an error there). */
   prompt?: string;

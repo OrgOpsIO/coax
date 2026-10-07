@@ -119,6 +119,25 @@ describe("elevenlabs speak through the real SDK", () => {
     expect(new URL(seen[1]!.url).pathname).toBe("/v1/text-to-speech/v-call");
   });
 
+  it("a per-call voice of \"\" counts as no voice: the endpoint's applies, else the voice-id error (review R2.7)", async () => {
+    const { client, seen } = stub(audioReply());
+    await elevenlabs({ model: "eleven_flash_v2_5", client, voice: "v-end" }).speak!({ input: "Hi.", voice: "" });
+    expect(new URL(seen[0]!.url).pathname).toBe("/v1/text-to-speech/v-end");
+    await expect(elevenlabs({ model: "eleven_flash_v2_5", client, voice: "" }).speak!({ input: "Hi.", voice: "" })).rejects.toThrow(/needs a voice id/);
+    expect(seen).toHaveLength(1);
+  });
+
+  it("a negative or non-numeric character-cost is not a billed count (review R2.6)", async () => {
+    for (const cost of ["-3", "-0.5", "Infinity", "NaN"]) {
+      const { client } = stub(audioReply({ "character-cost": cost }));
+      const res = await elevenlabs({ model: "eleven_flash_v2_5", client, voice: VOICE }).speak!({ input: "Hello there." });
+      expect(res.usage).toStrictEqual(emptyUsage());
+    }
+    const { client } = stub(audioReply({ "character-cost": " 0 " }));
+    const res = await elevenlabs({ model: "eleven_flash_v2_5", client, voice: VOICE }).speak!({ input: "Hi." });
+    expect(res.usage).toStrictEqual({ ...zeros, characters: 0 });
+  });
+
   it("a 200 with no audio bytes is a failure, never an empty success", async () => {
     const { client } = stub(audioReply(undefined, new Uint8Array(0)));
     await expect(elevenlabs({ model: "eleven_flash_v2_5", client, voice: VOICE }).speak!({ input: "Hi." })).rejects.toThrow(/returned no audio/);
@@ -289,6 +308,74 @@ describe("elevenlabs errors, retries and abort through the real SDK", () => {
       expect(seen).toHaveLength(1);
     });
   }
+
+  // What undici's fetch rejects with on a dropped connection: TypeError "fetch failed", the socket error as
+  // its cause (Node 22). The SDK wraps it into ElevenLabsError("fetch failed") with no statusCode and no
+  // code — the network code is only on err.cause.cause (SDK 2.71.0 core/fetcher/Fetcher.js, review R2.2).
+  const dropped = (code = "ECONNRESET") => Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error(`read ${code}`), { code }) });
+
+  it("a dropped connection (network error) is retried by coax (3 attempts), as on the OpenAI wire", async () => {
+    const { client, seen } = stub(() => Promise.reject(dropped()));
+    const err = await aiWith(client).speak({ model: "elevenlabs:eleven_flash_v2_5", input: "Hi." }).catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("ECONNRESET");
+    expect((err as Error).message).toMatch(/fetch failed/);
+    expect(seen).toHaveLength(3);
+
+    const stt = stub(() => Promise.reject(dropped("ECONNREFUSED")));
+    await aiWith(stt.client).transcribe({ model: "elevenlabs:scribe_v2", audio: { data: new Uint8Array([1]) } }).catch((e: unknown) => e);
+    expect(stt.seen).toHaveLength(3);
+  });
+
+  it("a network failure that recovers serves the call and reports its usage once", async () => {
+    const { client, seen } = stub((n) => (n === 1 ? Promise.reject(dropped()) : audioReply()()));
+    const usages: Usage[] = [];
+    const ai = createAI({ providers: { elevenlabs: (m) => elevenlabs({ model: m, client, voice: VOICE }) }, defaults: { retries: { attempts: 3, initialDelayMs: 1 } }, onUsage: (u) => void usages.push(u) });
+    const res = await ai.speak({ model: "elevenlabs:eleven_flash_v2_5", input: "Hello there." });
+    expect(seen).toHaveLength(2);
+    expect(res.usage).toStrictEqual({ ...zeros, characters: 12 });
+    expect(usages).toStrictEqual([{ ...zeros, characters: 12 }]);
+  });
+
+  it("an error's own code is never overwritten from its cause, and a non-Error rejection passes through as is", async () => {
+    const own = Object.assign(new Error("own"), { code: "E_OWN", cause: dropped() });
+    const fake = { speechToText: { convert: () => Promise.reject(own) }, textToSpeech: { convert: () => ({ withRawResponse: () => Promise.reject("plain") }) } };
+    const p = elevenlabs({ model: "scribe_v2", client: fake as never, voice: VOICE });
+    const err = await p.transcribe!({ audio: { data: new Uint8Array([1]) } }).catch((e: unknown) => e);
+    expect(err).toBe(own);
+    expect(own.code).toBe("E_OWN");
+    await expect(p.speak!({ input: "Hi." })).rejects.toBe("plain");
+  });
+
+  it("a network error that lands after an abort is a CoaxAbortError and is not retried", async () => {
+    const ac = new AbortController();
+    let requests = 0;
+    const fetch = async () => {
+      requests++;
+      ac.abort();
+      throw dropped();
+    };
+    const client = new ElevenLabsClient({ apiKey: "test-key", maxRetries: 0, timeoutInSeconds: 1, fetch: fetch as typeof globalThis.fetch });
+    await expect(aiWith(client).speak({ model: "elevenlabs:eleven_flash_v2_5", input: "Hi.", signal: ac.signal })).rejects.toBeInstanceOf(CoaxAbortError);
+    expect(requests).toBe(1);
+  });
+
+  it("the SDK's own timeout is not a network error and is not retried", async () => {
+    // The SDK aborts its own request at timeoutInSeconds (1 here) with the reason "timeout"; Node's fetch
+    // rejects with that reason itself, a string (measured: .ziv/logs/stage-02/fix/probe-timeout.log), so the
+    // SDK throws a plain ElevenLabsError "timeout" — not its ElevenLabsTimeoutError.
+    let requests = 0;
+    const fetch = (_url: unknown, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        requests++;
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+      });
+    const client = new ElevenLabsClient({ apiKey: "test-key", maxRetries: 0, timeoutInSeconds: 1, fetch: fetch as typeof globalThis.fetch });
+    const err = await aiWith(client).speak({ model: "elevenlabs:eleven_flash_v2_5", input: "Hi." }).catch((e: unknown) => e);
+    expect((err as Error).name).toBe("ElevenLabsError");
+    expect((err as Error).message).toBe('"timeout"');
+    expect((err as { code?: unknown }).code).toBeUndefined();
+    expect(requests).toBe(1);
+  }, 10_000);
 
   it("an abort mid-request is a CoaxAbortError", async () => {
     const { client, seen } = stub(() => new Promise<Response>(() => {}));

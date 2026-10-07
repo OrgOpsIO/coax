@@ -404,7 +404,7 @@ export function openai(opts: OpenAiOptions): Provider {
           // Endpoints differ on whether `voice` is optional; send the OpenAI default only as a fallback
           // so a service with its own default voice still behaves. `language` is not sent: /audio/speech
           // has no such field, the model reads the language from `input`.
-          voice: req.voice ?? opts.voice ?? "alloy",
+          voice: req.voice || opts.voice || "alloy",
           response_format: format,
           ...(req.speed != null ? { speed: req.speed } : {}),
           ...(req.instructions ? { instructions: req.instructions } : {}),

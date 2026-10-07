@@ -1,4 +1,3 @@
-import type { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
 import {
   emptyUsage,
   type AudioFormat,
@@ -19,9 +18,9 @@ export interface ElevenLabsOptions {
   model: string;
   /** Required unless `client` is given. coax never falls back to the SDK's `ELEVENLABS_API_KEY` env lookup. */
   apiKey?: string;
-  /** Inject an existing SDK client. Otherwise coax lazily constructs one from `apiKey` (the SDK ships
-   *  inside coax and is imported only then). */
-  client?: ElevenLabsClient;
+  /** Inject an existing SDK client (an `ElevenLabsClient`). Otherwise coax lazily constructs one from `apiKey`
+   *  (the SDK ships inside coax and is imported only then). */
+  client?: ElevenLabsClientLike;
   /** Host root, without `/v1` — e.g. a data-residency host. Default: the SDK's `https://api.elevenlabs.io`. */
   baseURL?: string;
   /** Headers sent with every request (per-call `headers` are merged over these). */
@@ -30,7 +29,17 @@ export interface ElevenLabsOptions {
   voice?: string;
 }
 
-type RequestOptions = { headers?: Record<string, string>; abortSignal?: AbortSignal };
+/**
+ * The part of the SDK's `ElevenLabsClient` coax calls, typed structurally: the SDK's own declarations do not
+ * compile with `skipLibCheck: false` (2.71.0), and naming them here would break every consumer of coax that
+ * type-checks its libraries — ElevenLabs user or not. A real `ElevenLabsClient` fits as it is.
+ */
+interface ElevenLabsClientLike {
+  textToSpeech: { convert(voiceId: string, request: unknown, requestOptions?: unknown): unknown };
+  speechToText: { convert(request: unknown, requestOptions?: unknown): unknown };
+}
+
+type RequestOptions ={ headers?: Record<string, string>; abortSignal?: AbortSignal };
 type RawWord = { text: string; start?: number | null; end?: number | null; type: string; speakerId?: string | null };
 type AnyClient = {
   textToSpeech: {
@@ -63,6 +72,27 @@ function characters(headers: Headers): number | undefined {
   if (!raw) return undefined;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+
+/**
+ * The SDK wraps a failed fetch (undici: TypeError "fetch failed", the socket error as its cause) into an
+ * ElevenLabsError with no status and no code, so coax's retry cannot tell a dropped connection from a bad
+ * request. Lift the network code from the cause chain onto the error; `isTransient` decides as for any vendor
+ * (and `withRetry` never retries an aborted call, whatever its code).
+ */
+function liftNetworkCode(err: unknown): unknown {
+  const e = err as (Error & { code?: unknown }) | undefined;
+  if (!(e instanceof Error) || e.code != null) return err;
+  let cause: unknown = e.cause;
+  for (let depth = 0; depth < 4 && cause && typeof cause === "object"; depth++) {
+    const code = (cause as { code?: unknown }).code;
+    if (typeof code === "string") {
+      e.code = code;
+      break;
+    }
+    cause = (cause as { cause?: unknown }).cause;
+  }
+  return err;
 }
 
 /** Spoken words only (no `spacing` / `audio_event` entries), with timing and the speaker label if any. */
@@ -116,7 +146,7 @@ export function elevenlabs(opts: ElevenLabsOptions): Provider {
 
     async speak(req: SpeakRequest): Promise<SpeakResponse> {
       // Every check runs before the SDK is loaded: the vendor is never billed for a call coax won't honour.
-      const voice = req.voice ?? opts.voice;
+      const voice = req.voice || opts.voice;
       if (!voice) throw new Error("coax: elevenlabs needs a voice id — pass `voice` to ai.speak() or set `voice` on the endpoint");
       if (req.instructions) throw new CoaxUnsupportedError("delivery instructions (`instructions`)", "elevenlabs");
       const format = req.format ?? "mp3";
@@ -140,7 +170,10 @@ export function elevenlabs(opts: ElevenLabsOptions): Provider {
           },
           requestOptions(req.headers, req.signal),
         )
-        .withRawResponse();
+        .withRawResponse()
+        .catch((err: unknown) => {
+          throw liftNetworkCode(err);
+        });
       const audio = new Uint8Array(await new Response(data).arrayBuffer());
       // Never an empty success: no audio is a failure, whatever the status said.
       if (audio.byteLength === 0) throw new Error("coax: elevenlabs returned no audio");
@@ -155,17 +188,21 @@ export function elevenlabs(opts: ElevenLabsOptions): Provider {
       const { mediaType } = req.audio;
       const filename = req.audio.filename ?? (mediaType ? `audio.${EXTENSIONS[mediaType] ?? "wav"}` : "audio");
       const c = await getClient();
-      const res = await c.speechToText.convert(
-        {
-          modelId: opts.model,
-          file: { data: req.audio.data, filename, ...(mediaType ? { contentType: mediaType } : {}) },
-          ...(req.language ? { languageCode: req.language } : {}),
-          ...(req.speakers ? { diarize: true } : {}),
-          // Keep "(laughter)"-style tags out of `text`, so it holds what was said — as on every other vendor.
-          tagAudioEvents: false,
-        },
-        requestOptions(req.headers, req.signal),
-      );
+      const res = await c.speechToText
+        .convert(
+          {
+            modelId: opts.model,
+            file: { data: req.audio.data, filename, ...(mediaType ? { contentType: mediaType } : {}) },
+            ...(req.language ? { languageCode: req.language } : {}),
+            ...(req.speakers ? { diarize: true } : {}),
+            // Keep "(laughter)"-style tags out of `text`, so it holds what was said — as on every other vendor.
+            tagAudioEvents: false,
+          },
+          requestOptions(req.headers, req.signal),
+        )
+        .catch((err: unknown) => {
+          throw liftNetworkCode(err);
+        });
       // The multichannel and webhook shapes (never requested by coax) carry no top-level text.
       if (typeof res.text !== "string") throw new Error("coax: elevenlabs returned no transcript text");
       const words = Array.isArray(res.words) ? toWords(res.words) : undefined;

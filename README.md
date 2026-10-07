@@ -238,6 +238,11 @@ One honest caveat: coax can only drop the connection to the endpoint. Anthropic,
 self-hosted runtimes (vLLM, …) stop generating on disconnect; a gateway in between must pass the
 disconnect upstream for the cancellation to reach the model server.
 
+A second one, on ElevenLabs: its SDK arms a 240-second timer for every request and does not clear it when
+the request is aborted or the connection drops. The call still fails at once, but a script, CLI or
+serverless function stays alive until that timer runs out. A long-running server never notices; a
+short-lived process ends with `process.exit()` after such a call.
+
 ### Failed runs still cost tokens
 
 A run that dies is booked, not lost: `CoaxToolError` and `CoaxLoopError` carry the `usage` summed over the
@@ -410,13 +415,18 @@ every vendor, and a cross-vendor fallback speaks with each vendor's own voice. A
 ElevenLabs has no default voice of its own — without one, coax fails before the call. coax does not look
 voices up by name.
 
-**Fields.** `language` on `speak` is a hint: ElevenLabs takes it, the OpenAI speech endpoint has no such
-field and reads the language from the text. On ElevenLabs a transcript carries `words` (`{ text, start,
+**Fields.** `language` on `speak` is a hint: ElevenLabs takes it, but its models ignore a language they
+don't support, and `eleven_multilingual_v2` (its default model) takes none. The OpenAI speech endpoint has
+no such field and reads the language from the text. On ElevenLabs a transcript carries `words` (`{ text, start,
 end, speaker? }`, in order); `speakers: true` labels who spoke each one (an error on the OpenAI wire).
 ElevenLabs serves `format` `mp3` (the default, 44.1 kHz / 128 kbps), `opus` (48 kHz / 128 kbps), `wav` and
 `pcm` (24 kHz), and `speed` 0.7–1.2. `aac`/`flac`, `instructions` and a transcription `prompt` raise
 `CoaxUnsupportedError` there rather than being dropped — the v3/v4 models take audio tags such as
 `[whispers]` in the text instead. A `speed` outside the range fails before the call.
+
+**Long recordings.** An ElevenLabs transcription is one request, and the SDK gives each request 240 seconds.
+A recording that takes longer to process fails with the SDK's `ElevenLabsError` `"timeout"`, which is not
+retried. Split long audio before you transcribe it.
 
 **Usage** comes in the vendor's billing unit, through the same `onUsage`: `usage.characters` for
 ElevenLabs speech, `usage.audioSeconds` for transcription (ElevenLabs, OpenAI whisper). Each is present
