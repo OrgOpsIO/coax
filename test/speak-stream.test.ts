@@ -368,3 +368,25 @@ describe("the ambient ai delegates the new calls", () => {
     expect((await ai.transcribeToken({ model: "v:m" })).token).toBe("t");
   });
 });
+
+// Measurer (stage 3): proofs for what the measurer's mutation sweep showed unproven (logs/stage-03/measure/mutate.log,
+// N14 N16).
+describe("streamed speech and tokens: gaps closed by the measurer (stage 3, fake providers)", () => {
+  it("the degrade path skips an empty speak result too: no zero-length chunk, speak's usage still booked", async () => {
+    // A provider of your own whose speak returns 0 bytes (the OpenAI wire's speak accepts such a 200, spec §10).
+    const usage = { ...zeros, characters: 2 };
+    const { ai, usages } = aiWith({ voice: provider("voice", { speak: async () => ({ audio: new Uint8Array(0), mediaType: "audio/mpeg", usage, model: "m" }) }) });
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hi." });
+    expect(await drain(opened.audio)).toStrictEqual([]);
+    expect((await opened.result).usage).toStrictEqual(usage);
+    expect(usages.map((u) => u.usage)).toStrictEqual([usage]);
+  });
+
+  it("a token's usage is the provider's, on the result and through onUsage — coax does not zero it", async () => {
+    // ElevenLabs reports zero units (assumption O18); a provider of your own may bill an issue, and that is booked.
+    const usage = { ...zeros, inputTokens: 3 };
+    const { ai, usages } = aiWith({ ears: provider("ears", { transcribeToken: async () => ({ token: "t", url: "wss://x", usage, model: "m" }) }) });
+    expect((await ai.transcribeToken({ model: "ears:m" })).usage).toStrictEqual(usage);
+    expect(usages.map((u) => u.usage)).toStrictEqual([usage]);
+  });
+});

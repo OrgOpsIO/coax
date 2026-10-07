@@ -902,3 +902,40 @@ describe("elevenlabs transcribeToken through the real SDK", () => {
     );
   });
 });
+
+// Measurer (stage 3): proofs for what the measurer's mutation sweep showed unproven (logs/stage-03/measure/mutate.log,
+// N23 N24 N27 N31). Same real SDK, same stubs.
+describe("elevenlabs streamed speech and tokens: gaps closed by the measurer (stage 3, real SDK)", () => {
+  const dropped = (code = "ECONNRESET") => Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error(`read ${code}`), { code }) });
+
+  it("a dropped connection before the header is retried for speakStream and transcribeToken (3 attempts), as for speak", async () => {
+    const s = stub(() => Promise.reject(dropped()));
+    const err = await voiceAI(s.client).ai.speakStream({ model: "elevenlabs:eleven_flash_v2_5", input: "Hi." }).catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("ECONNRESET");
+    expect(s.seen).toHaveLength(3);
+
+    const t = stub(() => Promise.reject(dropped("ECONNREFUSED")));
+    const terr = await voiceAI(t.client).ai.transcribeToken({ model: "elevenlabs:scribe_v2_realtime" }).catch((e: unknown) => e);
+    expect((terr as { code?: string }).code).toBe("ECONNREFUSED");
+    expect(t.seen).toHaveLength(3);
+  });
+
+  it("a streamed body dropped without the header carries no mark and reports nothing", async () => {
+    const s = streamStub(CHUNKS.slice(0, 1), "drop", {});
+    const { ai, usages } = voiceAI(s.client);
+    const opened = await ai.speakStream({ model: "elevenlabs:eleven_flash_v2_5", input: "Hi." });
+    const { got, err } = await drainAudio(opened.audio);
+    expect(got).toHaveLength(1);
+    expect(err).toBe(s.bodies[0]!.dropped);
+    expect(billedUsage(err)).toBeUndefined();
+    expect(usages).toHaveLength(0);
+  });
+
+  it("the realtime url keeps the SDK's case-insensitive scheme match", async () => {
+    const tokenReply = () => Response.json(TOKEN.fixture.response200);
+    const fetch = async () => tokenReply();
+    const client = new ElevenLabsClient({ apiKey: "test-key", maxRetries: 0, timeoutInSeconds: 1, fetch: fetch as typeof globalThis.fetch });
+    const res = await elevenlabs({ model: "scribe_v2_realtime", client, baseURL: "HTTPS://api.us.elevenlabs.io" }).transcribeToken!({});
+    expect(res.url).toBe("wss://api.us.elevenlabs.io/v1/speech-to-text/realtime");
+  });
+});

@@ -5,7 +5,7 @@ import { createAI, type AI } from "../src/ai";
 import { CoaxAbortError, CoaxUnsupportedError } from "../src/client";
 import { elevenlabs } from "../src/providers/elevenlabs";
 import { openai } from "../src/providers/openai";
-import type { Usage } from "../src/types";
+import { billedUsage, type Usage } from "../src/types";
 
 // Measurer (stage 2): the same contract on both voice vendors. Each `ai.*` call below is written ONCE and
 // run against the REAL vendor SDK (openai 6.x, @elevenlabs/elevenlabs-js 2.71.0) with a stubbed fetch —
@@ -208,9 +208,72 @@ describe.each(vendors)("streamed speech contract on $name (same caller code)", (
     expect(err).toBeInstanceOf(CoaxAbortError);
     await expect(result).rejects.toBe(err);
   });
+
+  // Measurer (stage 3): the rest of the stream contract, written once.
+  it("a 503 before the audio is retried by coax (3 attempts); an already-aborted call never reaches the wire", async () => {
+    const busy = v.build(() => Response.json({ error: { message: "busy" }, detail: { status: "busy", message: "busy" } }, { status: 503 }));
+    await expect(busy.ai.speakStream({ model: v.speakModel, input: "Hi." })).rejects.toBeInstanceOf(Error);
+    expect(busy.urls).toHaveLength(3);
+
+    const fresh = v.build(ok);
+    const done = new AbortController();
+    done.abort();
+    await expect(fresh.ai.speakStream({ model: v.speakModel, input: "Hi.", signal: done.signal })).rejects.toBeInstanceOf(CoaxAbortError);
+    expect(fresh.urls).toHaveLength(0);
+  });
+
+  it("an early break closes the response body on the wire and books nothing (assumption O19: break reports nothing)", async () => {
+    let cancelled = false;
+    const endless: Reply = () =>
+      new Response(
+        new ReadableStream<Uint8Array>({ pull: (c) => c.enqueue(AUDIO), cancel: () => void (cancelled = true) }, { highWaterMark: 0 }),
+        { status: 200, headers: { "content-type": "audio/mpeg", "character-cost": "12" } },
+      );
+    const seen: Usage[] = [];
+    const { ai } = v.build(endless, (u) => void seen.push(u));
+    const { audio } = await ai.speakStream({ model: v.speakModel, input: "Hi." });
+    for await (const _ of audio) break;
+    expect(cancelled).toBe(true);
+    expect(seen).toStrictEqual([]);
+  });
 });
 
 describe("voice contract: what differs between the vendors, pinned (measured)", () => {
+  it("an abort mid-speech carries what the vendor billed: characters on ElevenLabs, zero units on the OpenAI wire (measurer, stage 3)", async () => {
+    const abortedUsage = async (v: Vendor) => {
+      const seen: Usage[] = [];
+      const { ai } = v.build(hangingSpeech, (u) => void seen.push(u));
+      const ac = new AbortController();
+      const { audio } = await ai.speakStream({ model: v.speakModel, input: "Hi.", signal: ac.signal });
+      const err = (await (async () => {
+        for await (const _ of audio) ac.abort();
+      })().catch((e: unknown) => e)) as CoaxAbortError;
+      expect(err).toBeInstanceOf(CoaxAbortError);
+      return { usage: err.usage, billed: billedUsage(err), seen };
+    };
+    const zeros = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    expect(await abortedUsage(vendors[0]!)).toStrictEqual({ usage: zeros, billed: undefined, seen: [] });
+    expect(await abortedUsage(vendors[1]!)).toStrictEqual({ usage: { ...zeros, characters: 12 }, billed: { ...zeros, characters: 12 }, seen: [{ ...zeros, characters: 12 }] });
+  });
+
+  it("ai.transcribeToken, same caller code: ElevenLabs issues a token, the OpenAI wire refuses before the wire (measurer, stage 3)", async () => {
+    const tokenReply: Reply = (url) => (url.includes("single-use-token") ? Response.json({ token: "sutkn_parity" }) : Response.json({}, { status: 404 }));
+    const results = [];
+    for (const [v, model] of [[vendors[0]!, "openai:gpt-4o-transcribe"], [vendors[1]!, "elevenlabs:scribe_v2_realtime"]] as const) {
+      const seen: Usage[] = [];
+      const { ai, urls } = v.build(tokenReply, (u) => void seen.push(u));
+      const res = await ai.transcribeToken({ model }).then(
+        (r) => ({ keys: Object.keys(r).sort(), url: r.url, model: r.model }),
+        (e: unknown) => ({ error: (e as Error).constructor.name, capability: (e as CoaxUnsupportedError).capability, provider: (e as CoaxUnsupportedError).provider }),
+      );
+      results.push({ res, requests: urls.length, reported: seen.length });
+    }
+    expect(results).toStrictEqual([
+      { res: { error: "CoaxUnsupportedError", capability: "realtime transcription tokens", provider: "openai" }, requests: 0, reported: 0 },
+      { res: { keys: ["model", "token", "url", "usage"], url: "wss://api.elevenlabs.io/v1/speech-to-text/realtime", model: "scribe_v2_realtime" }, requests: 1, reported: 1 },
+    ]);
+  });
+
   it("a vendor HTTP error carries `status` on the OpenAI wire but only `statusCode` on ElevenLabs — coax passes SDK errors through", async () => {
     const statusOf = async (v: Vendor) => {
       const { ai } = v.build(() => Response.json({ detail: { status: "invalid_api_key", message: "no" } }, { status: 401 }));
