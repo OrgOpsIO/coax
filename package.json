@@ -11,6 +11,9 @@
     "zod",
     "openai",
     "anthropic",
+    "elevenlabs",
+    "text-to-speech",
+    "speech-to-text",
     "json-schema",
     "typescript",
     "provider-agnostic"
@@ -42,7 +45,8 @@
   "dependencies": {
     "jsonrepair": "^3.13.1",
     "@anthropic-ai/sdk": "^0.95.0",
-    "openai": "^6.7.0"
+    "openai": "^6.7.0",
+    "@elevenlabs/elevenlabs-js": "^2.71.0"
   },
   "devDependencies": {
     "tsup": "^8.0.0",
