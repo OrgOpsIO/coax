@@ -321,7 +321,7 @@ abort happened inside `ai.run()`, so an aborted run is exactly as resumable as o
 
 A failed call that the vendor still billed is booked the same way, whichever provider raised it: a refusal
 (`CoaxRefusalError` carries its `usage`), a Gemini turn that ended without a usable answer, an embedding
-batch cut short after some inputs. `onUsage` sees each once, `billedUsage(err)` returns what the failed
+batch cut short after some inputs, an ElevenLabs speech billed in characters that came back without audio. `onUsage` sees each once, `billedUsage(err)` returns what the failed
 call cost, and inside `ai.run()` or `ai.loop()` it counts toward the budget (and toward the run's usage). Such an attempt that coax retried
 is added to the `usage` of the call that finally succeeds (or rides on the error that finally escapes). A provider
 of your own marks such an error with `withBilledUsage(err, usage)`. The `onUsage` hook and any `Budget` see
@@ -708,7 +708,7 @@ Small and unopinionated. The only vendor-specific surface is the `Provider` inte
 or honestly doesn't. A voice-only vendor (ElevenLabs) implements `structured` and `text` by raising
 `CoaxUnsupportedError` — the same error as for any missing capability. Everything else — schema handling, aggressive parsing, the repair/retry/fallback
 loop, the tool driver, prompt files — is pure and unit-tested against fakes, no network. Zod is a peer
-dependency (you write the schemas); the provider SDKs (Anthropic, OpenAI, Google) ship inside coax and
+dependency (you write the schemas); the provider SDKs (Anthropic, OpenAI, Google, ElevenLabs) ship inside coax and
 load lazily — only when a call first needs one. The high-level
 `createAI` is the recommended entry point; `createClient` (single provider, no config) is available for
 lower-level use.

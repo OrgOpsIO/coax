@@ -84,6 +84,14 @@ describe("google: lazy SDK loading and constructor options (T2)", () => {
     expect(sdk.constructed.length).toBe(before);
   });
 
+  // Stage 2 gave ProviderEndpoint a `voice`; at the merge google rejects it like the other OpenAI-wire keys (stage-02-spec §9).
+  it("voice under google rejects the call too; no client is constructed", async () => {
+    const before = sdk.constructed.length;
+    const ai = createAI({ providers: { google: { apiKey: "k", voice: "alloy" } as never } });
+    await expect(ai.text({ model: "google:gemini-3.5-flash", prompt: "?" })).rejects.toThrow("does not take `voice`");
+    expect(sdk.constructed.length).toBe(before);
+  });
+
   it("a provider constructs its client once and reuses it", async () => {
     const before = sdk.constructed.length;
     const ai = createAI({ providers: { google: "k" } });

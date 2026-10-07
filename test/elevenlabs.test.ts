@@ -174,6 +174,16 @@ describe("elevenlabs configuration", () => {
     });
   }
 
+  // Added at the merge with stage 1 (stage-02-spec §9): Google's options are a type error on ElevenLabsEndpoint
+  // and, for JavaScript and configs read at runtime, a config error rather than dropped.
+  for (const [key, value] of [["project", "p"], ["location", "eu"], ["googleAuthOptions", {}]] as const) {
+    it(`rejects the Google key \`${key}\` instead of dropping it`, () => {
+      const registry = createRegistry({ providers: { elevenlabs: { apiKey: "k", [key]: value } as never, labs: { api: "elevenlabs", apiKey: "k", [key]: value } as never } });
+      expect(() => registry.resolve("elevenlabs:scribe_v2")).toThrow(new RegExp(`does not take \`${key}\``));
+      expect(() => registry.resolve("labs:scribe_v2")).toThrow(new RegExp(`provider "labs" \\(api "elevenlabs"\\) does not take \`${key}\``));
+    });
+  }
+
   it("a model key points at the reference instead", () => {
     const registry = createRegistry({ providers: { labs: { api: "elevenlabs", apiKey: "k", speakModel: "x" } as never } });
     expect(() => registry.resolve("labs:eleven_v3")).toThrow(/name the model in the reference, e\.g\. "labs:scribe_v2"/);

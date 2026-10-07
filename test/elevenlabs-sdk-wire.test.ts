@@ -4,7 +4,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { createAI } from "../src/ai";
 import { CoaxAbortError, CoaxUnsupportedError } from "../src/client";
 import { elevenlabs } from "../src/providers/elevenlabs";
-import { emptyUsage, type Provider, type Usage } from "../src/types";
+import { billedUsage, emptyUsage, type Provider, type Usage } from "../src/types";
 
 // The REAL SDK (@elevenlabs/elevenlabs-js 2.71.0) in the loop, against a stubbed fetch: no network,
 // fake key. Fixtures are copies of .ziv/reference/fixtures/stage-02 (each names its source inside).
@@ -148,6 +148,34 @@ describe("elevenlabs speak through the real SDK", () => {
     await expect(elevenlabs({ model: "eleven_flash_v2_5", client, voice: VOICE }).speak!({ input: "Hi." })).rejects.toThrow(/returned no audio/);
   });
 
+  it("a 200 with no audio bytes still carries the characters it was billed; without the header it carries none (review R2.4)", async () => {
+    const billed = stub(audioReply(undefined, new Uint8Array(0)));
+    const err = await elevenlabs({ model: "eleven_flash_v2_5", client: billed.client, voice: VOICE }).speak!({ input: "Hi." }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/returned no audio/);
+    expect(billedUsage(err)).toStrictEqual({ ...zeros, characters: 12 });
+
+    const unbilled = stub(audioReply({}, new Uint8Array(0)));
+    const err2 = await elevenlabs({ model: "eleven_flash_v2_5", client: unbilled.client, voice: VOICE }).speak!({ input: "Hi." }).catch((e: unknown) => e);
+    expect((err2 as Error).message).toMatch(/returned no audio/);
+    expect(billedUsage(err2)).toBeUndefined();
+  });
+
+  it("through createAI, a billed 200 with no audio reaches onUsage once and is not retried (review R2.4)", async () => {
+    const { client, seen } = stub(audioReply(undefined, new Uint8Array(0)));
+    const seenUsage: { usage: Usage; model: string }[] = [];
+    const ai = createAI({
+      providers: { elevenlabs: (m) => elevenlabs({ model: m, client, voice: "v" }) },
+      defaults: { retries: { attempts: 3, initialDelayMs: 1 } },
+      onUsage: (usage, meta) => void seenUsage.push({ usage, model: meta.model }),
+    });
+    const err = await ai.speak({ model: "elevenlabs:eleven_flash_v2_5", input: "Hi." }).catch((e: unknown) => e);
+    expect((err as Error).message).toMatch(/returned no audio/);
+    expect(billedUsage(err)).toStrictEqual({ ...zeros, characters: 12 });
+    expect(seenUsage).toStrictEqual([{ usage: { ...zeros, characters: 12 }, model: "eleven_flash_v2_5" }]);
+    expect(seen).toHaveLength(1);
+  });
+
   it("refuses what it cannot honour before the wire", async () => {
     const { client, seen } = stub(audioReply());
     const p = elevenlabs({ model: "eleven_flash_v2_5", client });
@@ -253,6 +281,16 @@ describe("elevenlabs transcribe through the real SDK", () => {
   it("a shape without top-level text (multichannel) is an error, not an empty transcript", async () => {
     const { client } = stub(() => Response.json(STT_OTHER.fixture.multichannel_separate));
     await expect(elevenlabs({ model: "scribe_v2", client }).transcribe!({ audio: webm })).rejects.toThrow(/no transcript text/);
+  });
+
+  it("a shape without top-level text that names its audio duration still carries the seconds it was billed (COMPOSED: the doc example plus the SDK type's optional audio_duration_secs)", async () => {
+    const { client } = stub(() => Response.json({ ...STT_OTHER.fixture.multichannel_separate, audio_duration_secs: 2.5 }));
+    const err = await elevenlabs({ model: "scribe_v2", client }).transcribe!({ audio: webm }).catch((e: unknown) => e);
+    expect((err as Error).message).toMatch(/no transcript text/);
+    expect(billedUsage(err)).toStrictEqual({ ...zeros, audioSeconds: 2.5 });
+
+    const unbilled = stub(() => Response.json(STT_OTHER.fixture.multichannel_separate));
+    expect(billedUsage(await elevenlabs({ model: "scribe_v2", client: unbilled.client }).transcribe!({ audio: webm }).catch((e: unknown) => e))).toBeUndefined();
   });
 
   it("a transcription prompt is refused before the wire", async () => {

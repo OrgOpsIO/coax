@@ -68,6 +68,26 @@ describe("README: ElevenLabs and voice configuration", () => {
     expect(section("### Voice")).toContain("`eleven_multilingual_v2` (its default model) takes none");
   });
 
+  // The merge with stage 1 (stage-02-spec §9): every place that names the SDKs coax ships names all of them.
+  it("the README's SDK sentences and the package description name every vendor SDK in dependencies", () => {
+    const VENDORS: Record<string, string> = { "@anthropic-ai/sdk": "Anthropic", openai: "OpenAI", "@google/genai": "Google", "@elevenlabs/elevenlabs-js": "ElevenLabs" };
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { description: string; dependencies: Record<string, string> };
+    const sdks = Object.keys(pkg.dependencies).filter((d) => d !== "jsonrepair");
+    // A new SDK fails here until it is named below — and in the sentences this test reads.
+    expect([...sdks].sort()).toStrictEqual(Object.keys(VENDORS).sort());
+    const intro = flat.match(/The [^.]*SDKs ship \*inside\* coax/)?.[0] ?? "";
+    const design = flat.match(/the provider SDKs \([^)]*\) ship inside coax/)?.[0] ?? "";
+    for (const name of Object.values(VENDORS)) {
+      expect(intro).toContain(name);
+      expect(design).toContain(name);
+      expect(pkg.description).toContain(name);
+    }
+  });
+
+  it("names ElevenLabs among the failed calls that are still billed (review R2.4)", () => {
+    expect(section("### Failed runs still cost tokens")).toContain("an ElevenLabs speech billed in characters that came back without audio");
+  });
+
   it("a bare key and the residency name resolve to the elevenlabs provider", () => {
     expect(createRegistry(README_CONFIGS.bareKey).resolve("elevenlabs:scribe_v2").primary.name).toBe("elevenlabs");
     const eu = createRegistry(README_CONFIGS.residency).resolve("labs-eu:eleven_flash_v2_5");

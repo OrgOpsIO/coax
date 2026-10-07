@@ -1,5 +1,6 @@
 import {
   emptyUsage,
+  withBilledUsage,
   type AudioFormat,
   type Provider,
   type ProviderResponse,
@@ -175,10 +176,13 @@ export function elevenlabs(opts: ElevenLabsOptions): Provider {
           throw liftNetworkCode(err);
         });
       const audio = new Uint8Array(await new Response(data).arrayBuffer());
-      // Never an empty success: no audio is a failure, whatever the status said.
-      if (audio.byteLength === 0) throw new Error("coax: elevenlabs returned no audio");
       const billed = characters(rawResponse.headers);
       const usage: Usage = { ...emptyUsage(), ...(billed != null ? { characters: billed } : {}) };
+      // Never an empty success: no audio is a failure, whatever the status said — and it still cost what the header says.
+      if (audio.byteLength === 0) {
+        const err = new Error("coax: elevenlabs returned no audio");
+        throw billed != null ? withBilledUsage(err, usage) : err;
+      }
       return { audio, mediaType: variant.mediaType, usage, model: opts.model };
     },
 
@@ -203,11 +207,15 @@ export function elevenlabs(opts: ElevenLabsOptions): Provider {
         .catch((err: unknown) => {
           throw liftNetworkCode(err);
         });
-      // The multichannel and webhook shapes (never requested by coax) carry no top-level text.
-      if (typeof res.text !== "string") throw new Error("coax: elevenlabs returned no transcript text");
-      const words = Array.isArray(res.words) ? toWords(res.words) : undefined;
       const seconds = res.audioDurationSecs;
-      const usage: Usage = { ...emptyUsage(), ...(typeof seconds === "number" && Number.isFinite(seconds) ? { audioSeconds: seconds } : {}) };
+      const billed = typeof seconds === "number" && Number.isFinite(seconds);
+      const usage: Usage = { ...emptyUsage(), ...(billed ? { audioSeconds: seconds } : {}) };
+      // The multichannel and webhook shapes (never requested by coax) carry no top-level text; a duration on them was billed.
+      if (typeof res.text !== "string") {
+        const err = new Error("coax: elevenlabs returned no transcript text");
+        throw billed ? withBilledUsage(err, usage) : err;
+      }
+      const words = Array.isArray(res.words) ? toWords(res.words) : undefined;
       return { text: res.text, ...(words ? { words } : {}), usage, model: opts.model };
     },
   };
