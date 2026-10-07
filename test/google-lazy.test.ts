@@ -69,6 +69,8 @@ describe("google: lazy SDK loading and constructor options (T2)", () => {
   // Review R1.12: a ProviderEndpoint-shaped config compiles under google; its keys must not be dropped.
   it("ProviderEndpoint-only keys under google (baseURL, tokenParam, strict, transcribeModel, speakModel) reject the call; no client is constructed", async () => {
     const before = sdk.constructed.length;
+    // A type error for TypeScript callers; the runtime check below is for JavaScript and configs read at runtime.
+    // @ts-expect-error baseURL is not a GoogleEndpoint option
     const proxied = createAI({ providers: { google: { apiKey: "k", baseURL: "https://llm-proxy.internal.example/" } } });
     await expect(proxied.text({ model: "google:gemini-3.5-flash", prompt: "?" })).rejects.toThrow(/has no baseURL .* use `api: "openai"`/);
     // Under a free name with api "google" the object is not a literal of either member, as in a config file read at runtime.

@@ -31,6 +31,10 @@ export interface ProviderEndpoint {
   /** OpenAI wire only: `strict: true` structured output — the schema shape is grammar-guaranteed by the
    *  endpoint. Opt-in; needs strict-compatible schemas. See `OpenAiOptions.strict`. */
   strict?: boolean;
+  /** Google only (see {@link GoogleEndpoint}) — here a type error, as a typo would be. */
+  project?: never;
+  location?: never;
+  googleAuthOptions?: never;
 }
 
 /**
@@ -57,6 +61,12 @@ export interface GoogleEndpoint {
   /** Model for `ai.embed()`. Default: the model of the reference (e.g. `google:gemini-embedding-001`).
    *  When set, it wins over the reference for every embed through this endpoint (as on the OpenAI wire). */
   embedModel?: string;
+  /** Not on Google (see {@link ProviderEndpoint}) — here a type error, as a typo would be. */
+  baseURL?: never;
+  transcribeModel?: never;
+  speakModel?: never;
+  tokenParam?: never;
+  strict?: never;
 }
 
 /**
@@ -67,6 +77,18 @@ export interface GoogleEndpoint {
  *  - a factory `(model) => Provider` to plug in ANY provider (a local model, a mock in tests).
  */
 export type ProviderConfig = string | ProviderEndpoint | GoogleEndpoint | ((model: string) => Provider);
+
+/**
+ * The `providers` map. The built-in names take only their own form — so an option of another vendor under
+ * `openai`, `anthropic` or `google` is a type error rather than silently ignored; any other name takes any
+ * {@link ProviderConfig} (with `api` naming its protocol).
+ */
+export interface ProvidersConfig {
+  anthropic?: string | ProviderEndpoint | ((model: string) => Provider);
+  openai?: string | ProviderEndpoint | ((model: string) => Provider);
+  google?: string | GoogleEndpoint | ((model: string) => Provider);
+  [name: string]: ProviderConfig | undefined;
+}
 
 /**
  * A model alias resolves to `"provider:model"`, optionally with a fallback model on failure and a
@@ -115,7 +137,7 @@ export interface CallMeta {
 export interface AIConfig {
   /** Provider keys/endpoints/factories. Keys `anthropic`, `openai` and `google` work from a bare API key;
    *  any other name needs `api` (compatible endpoint, or `"google"`) or a factory. */
-  providers: Record<string, ProviderConfig>;
+  providers: ProvidersConfig;
   /** Named model aliases → "provider:model" (+ optional fallback). */
   models?: Record<string, ModelConfig>;
   defaults?: CallDefaults;
