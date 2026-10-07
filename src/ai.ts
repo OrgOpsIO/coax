@@ -1,6 +1,6 @@
 import { z, type ZodType } from "zod";
 import type { AIConfig } from "./config";
-import type { AudioFormat, AudioInput, EmbedResponse, Media, Message, Provider, ReasoningEffort, Usage } from "./types";
+import type { AudioFormat, AudioInput, EmbedResponse, Media, Message, Provider, ReasoningEffort, TranscribeTokenResponse, Usage } from "./types";
 import { CoaxAbortError, createClient, type ObjectResult, type SpeakResult, type TextResult, type TranscribeResult } from "./client";
 import { createRegistry, retrying, type CallSettings } from "./registry";
 import { parsePrompt, renderTemplate, type ParsedPrompt } from "./prompt-file";
@@ -152,6 +152,32 @@ export interface RunStream<T = unknown> {
   result: Promise<RunResult<T>>;
 }
 
+/** What `ai.speakStream()` opens: the audio as it arrives, its MIME type up front, and the bill once drained. */
+export interface SpeakStream {
+  /** Encoded audio chunks in arrival order — one file in `mediaType`, cut wherever the network cut it.
+   *  Iterate exactly once. Stop early with the call's `signal` to have the speech booked; a `break` closes the
+   *  connection but reports nothing. */
+  audio: AsyncIterable<Uint8Array>;
+  /** MIME type of the audio, known before the first chunk — e.g. for the response's content-type. */
+  mediaType: string;
+  /** Resolves once `audio` has been fully consumed; rejects if the audio dies mid-flight (CoaxAbortError
+   *  on abort — with what the vendor already billed). */
+  result: Promise<SpeakStreamResult>;
+}
+
+export interface SpeakStreamResult {
+  mediaType: string;
+  usage: Usage;
+  model: string;
+}
+
+export interface TranscribeTokenCall {
+  model?: string;
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+  purpose?: string;
+}
+
 /** Recursively optional — the honest type of an object still being generated. */
 export type DeepPartial<T> = T extends (infer U)[] ? DeepPartial<U>[] : T extends object ? { [K in keyof T]?: DeepPartial<T[K]> } : T;
 
@@ -180,16 +206,23 @@ function split<Y, R>(opened: { gen: AsyncGenerator<Y, R, void>; first: IteratorR
   });
   result.catch(() => {});
   async function* pump(): AsyncGenerator<Y, void, void> {
+    let settled = false;
     try {
       let cur = opened.first;
       while (!cur.done) {
         yield cur.value;
         cur = await opened.gen.next();
       }
+      settled = true;
       resolveResult(cur.value);
     } catch (err) {
+      settled = true;
       rejectResult(err);
       throw err;
+    } finally {
+      // The consumer stopped early (`break`): close the source too, so a provider stream releases its
+      // connection instead of staying suspended. `result` stays pending, as it always has.
+      if (!settled) await opened.gen.return(undefined as R);
     }
   }
   return { stream: pump(), result };
@@ -248,6 +281,17 @@ export interface AI {
   transcribe(call: TranscribeCall): Promise<TranscribeResult>;
   /** Text-to-speech against an endpoint that serves it. */
   speak(call: SpeakCall): Promise<SpeakResult>;
+  /**
+   * Text-to-speech, streamed — same call shape as `speak()`. The returned promise resolves once the first
+   * audio chunk is in, so retries and model fallback still cover a primary that fails before producing
+   * anything; after that the speech is committed. Chunks arrive as the vendor sends them.
+   */
+  speakStream(call: SpeakCall): Promise<SpeakStream>;
+  /**
+   * A short-lived, single-use token for realtime transcription in the browser: the browser streams its
+   * microphone straight to the vendor with it, and the key stays on the server.
+   */
+  transcribeToken(call: TranscribeTokenCall): Promise<TranscribeTokenResponse>;
   /**
    * Load a `.prompt.md` file and return a callable. Pass `schema` for structured output, else text.
    * The returned function fills the file's `{{ vars }}` and runs the call with the file's config;
@@ -519,6 +563,33 @@ export function createAI(config: AIConfig): AI {
           headers: call.headers,
           signal: call.signal,
         }),
+      );
+    },
+
+    async speakStream(call: SpeakCall): Promise<SpeakStream> {
+      // Opening = the vendor's answer AND the first chunk, inside withFallback — as for `stream()`.
+      const opened = await withFallback(call.model, call.model, call.purpose ?? "speakStream", async (client) => {
+        const s = await client.speakStream({
+          input: call.input,
+          voice: call.voice,
+          format: call.format,
+          speed: call.speed,
+          instructions: call.instructions,
+          ...(call.language != null ? { language: call.language } : {}),
+          headers: call.headers,
+          signal: call.signal,
+        });
+        return { gen: s.audio, first: await s.audio.next(), mediaType: s.mediaType, model: s.model };
+      });
+      const { stream, result } = split(opened);
+      const final = result.then((usage) => ({ mediaType: opened.mediaType, usage, model: opened.model }));
+      final.catch(() => {}); // same reason as in split()
+      return { audio: stream, mediaType: opened.mediaType, result: final };
+    },
+
+    transcribeToken(call: TranscribeTokenCall): Promise<TranscribeTokenResponse> {
+      return withFallback(call.model, call.model, call.purpose ?? "transcribeToken", (client) =>
+        client.transcribeToken({ headers: call.headers, signal: call.signal }),
       );
     },
 

@@ -62,7 +62,8 @@ export function retrying(provider: Provider, cfg?: RetryConfig): Provider {
     structured: (req) => withBilledRetry(() => provider.structured(req), cfg, req.signal),
     text: (req) => withBilledRetry(() => provider.text(req), cfg, req.signal),
     // A stream is never retried mid-flight (deltas already reached the consumer); failures before the
-    // first delta are covered by the ai-layer fallback instead.
+    // first delta are covered by the ai-layer fallback instead. `speakStream` retries its opening, before
+    // any audio; the audio itself never.
     ...(provider.textStream ? { textStream: (req: Parameters<NonNullable<Provider["textStream"]>>[0]) => provider.textStream!(req) } : {}),
     ...(provider.structuredStream ? { structuredStream: (req: Parameters<NonNullable<Provider["structuredStream"]>>[0]) => provider.structuredStream!(req) } : {}),
     ...(provider.toolsStream ? { toolsStream: (req: Parameters<NonNullable<Provider["toolsStream"]>>[0]) => provider.toolsStream!(req) } : {}),
@@ -72,6 +73,11 @@ export function retrying(provider: Provider, cfg?: RetryConfig): Provider {
     ...(provider.tools ? { tools: (req: Parameters<NonNullable<Provider["tools"]>>[0]) => withBilledRetry(() => provider.tools!(req), cfg, req.signal) } : {}),
     ...(provider.transcribe ? { transcribe: (req: Parameters<NonNullable<Provider["transcribe"]>>[0]) => withBilledRetry(() => provider.transcribe!(req), cfg, req.signal) } : {}),
     ...(provider.speak ? { speak: (req: Parameters<NonNullable<Provider["speak"]>>[0]) => withBilledRetry(() => provider.speak!(req), cfg, req.signal) } : {}),
+    // Plain withRetry: the opening carries no usage, and no built-in provider marks a failure before the header.
+    ...(provider.speakStream ? { speakStream: (req: Parameters<NonNullable<Provider["speakStream"]>>[0]) => withRetry(() => provider.speakStream!(req), cfg, req.signal) } : {}),
+    ...(provider.transcribeToken
+      ? { transcribeToken: (req: Parameters<NonNullable<Provider["transcribeToken"]>>[0]) => withBilledRetry(() => provider.transcribeToken!(req), cfg, req.signal) }
+      : {}),
   };
 }
 

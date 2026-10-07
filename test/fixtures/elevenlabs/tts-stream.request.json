@@ -1,0 +1,28 @@
+{
+  "source": "MEASURED 2026-10-08: the real @elevenlabs/elevenlabs-js 2.71.0 with Node 22.22.3's real fetch against a local HTTP server, fake key (logs/stage-03/survey/probe-stream.mjs, case stream-wire; output probe-stream.out). Endpoint VERBATIM from https://elevenlabs.io/docs/api-reference/text-to-speech/stream and https://api.elevenlabs.io/openapi.json (paths./v1/text-to-speech/{voice_id}/stream.post), both accessed 2026-10-08. SDK signature: api/resources/textToSpeech/client/Client.d.ts l.50.",
+  "kind": "sdk-params + rest-request (JSON)",
+  "fixture": {
+    "sdkCall": "client.textToSpeech.stream(voiceId, { text, modelId, outputFormat, languageCode, voiceSettings: { speed } }, { headers, abortSignal, maxRetries: 0 }).withRawResponse()",
+    "sdkParams": {
+      "voiceId": "VOICE_ID",
+      "request": { "text": "Hello there.", "modelId": "eleven_flash_v2_5", "outputFormat": "mp3_44100_128", "languageCode": "en", "voiceSettings": { "speed": 1.1 } },
+      "requestOptions": { "headers": { "x-call": "1" } }
+    },
+    "wire": {
+      "method": "POST",
+      "path": "/v1/text-to-speech/VOICE_ID/stream?output_format=mp3_44100_128",
+      "headers": { "xi-api-key": "<key>", "content-type": "application/json", "accept": "*/*", "x-call": "1" },
+      "body": { "text": "Hello there.", "model_id": "eleven_flash_v2_5", "language_code": "en", "voice_settings": { "speed": 1.1 } }
+    },
+    "queryParams": {
+      "output_format": "same 21-value enum as convert; default mp3_44100_128 (openapi)",
+      "enable_logging": "boolean, default true; false = zero retention, Enterprise only (openapi)",
+      "optimize_streaming_latency": "integer 0-4, DEPRECATED (openapi 'deprecated: true')"
+    },
+    "bodyFields": "Identical key set to convert (openapi Body_text_to_speech_stream vs Body_text_to_speech_full): text, model_id, language_code, voice_settings, pronunciation_dictionary_locators, seed, previous_text, next_text, previous_request_ids, next_request_ids, use_pvc_as_ivc, apply_text_normalization, apply_language_text_normalization"
+  },
+  "expect": {
+    "sameAsSpeak": "Everything coax sends for speak (voice id in the path, model_id, output_format query, language_code, voice_settings.speed) goes to /stream unchanged; only the path gains '/stream'.",
+    "noNewRequiredField": "Streaming needs no field speak does not already have."
+  }
+}

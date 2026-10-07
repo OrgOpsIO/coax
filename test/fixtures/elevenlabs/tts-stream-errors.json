@@ -1,0 +1,40 @@
+{
+  "source": "MEASURED 2026-10-08: real SDK 2.71.0 + Node 22.22.3 real fetch (undici) against a local HTTP server, fake key (logs/stage-03/survey/probe-stream.mjs; output probe-stream.out). Error envelopes {detail:{type,code,message,status,request_id}} from https://elevenlabs.io/docs/eleven-api/resources/errors (accessed 2026-10-08); values COMPOSED.",
+  "kind": "thrown errors at the SDK boundary and from the body reader",
+  "fixture": {
+    "httpErrorBeforeAudio": {
+      "401": { "class": "ElevenLabsError", "statusCode": 401, "message": "Status code: 401", "body": { "detail": { "type": "authentication_error", "code": "invalid_api_key", "message": "Invalid API key", "status": "invalid_api_key", "request_id": "req_x" } } },
+      "400": { "class": "ElevenLabsError", "statusCode": 400, "message": "Status code: 400", "body": { "detail": { "type": "validation_error", "code": "voice_not_found", "message": "A voice with the voice_id VOICE_ID was not found.", "status": "voice_not_found" } } },
+      "429": { "class": "ElevenLabsError", "statusCode": 429, "message": "Status code: 429", "body": { "detail": { "type": "rate_limit_error", "code": "concurrent_limit_exceeded", "message": "Too many concurrent requests." } } },
+      "where": "thrown by stream(...).withRawResponse() itself - before any chunk, exactly as for convert()"
+    },
+    "abortBeforeHeader": {
+      "thrownBy": "stream(...).withRawResponse()",
+      "error": { "class": "ElevenLabsError", "message": "The user aborted a request", "statusCode": null, "cause": { "name": "AbortError", "message": "This operation was aborted", "code": 20 } },
+      "timerLeak": "YES - the SDK's request timer is not cleared on a rejected fetch (core/fetcher/makeRequest.js): a child process with timeoutInSeconds 4 lived 4930 ms after a call that settled at 56 ms; with the default 240 s the process lived 241 s (logs/stage-03/survey/leak240.out; same leak as stage 2)."
+    },
+    "abortAfterHeaderMidBody": {
+      "thrownBy": "the reader of data (for await over the ReadableStream) - NOT the SDK",
+      "chunksBeforeError": 2,
+      "error": { "class": "DOMException", "name": "AbortError", "message": "This operation was aborted", "code": 20, "isElevenLabsError": false },
+      "characterCostAlreadyKnown": "12",
+      "timerLeak": "NO - the timer was cleared when the header arrived (makeRequest.js l.56-57): child process with the DEFAULT 240 s timeout exited 1780 ms after start (call done at 14 ms)."
+    },
+    "connectionDroppedMidBody": {
+      "thrownBy": "the reader of data",
+      "chunksBeforeError": 2,
+      "error": { "class": "TypeError", "message": "terminated", "cause": { "name": "SocketError", "message": "other side closed", "code": "UND_ERR_SOCKET" }, "isElevenLabsError": false },
+      "characterCostAlreadyKnown": "12"
+    },
+    "sdkTimeout": {
+      "noHeaderWithin": { "timeoutInSeconds": 1, "afterMs": 1009, "error": { "class": "ElevenLabsError", "message": "\"timeout\"", "statusCode": null } },
+      "bodyLongerThanTimeout": { "timeoutInSeconds": 1, "bodyLastedMs": 2021, "chunks": 6, "error": null, "meaning": "the SDK timeout bounds only time-to-first-byte on /stream (and convert); a long streamed speech is not cut at 240 s" }
+    },
+    "midStreamErrorEvent": "NONE documented: /stream is raw chunked audio, there is no in-band error frame. A failure after the header can only show up as a broken/short body (GUESS: the vendor ends the body early or resets the connection; not documented)."
+  },
+  "expect": {
+    "beforeFirstChunk": "Same classes and statuses as speak today: coax's retry (isTransient on statusCode / lifted network code) and the ai-layer fallback apply.",
+    "afterFirstChunk": "The error comes from undici, not the SDK: DOMException AbortError when the caller's signal aborted, TypeError 'terminated' (cause code UND_ERR_SOCKET) when the connection dropped. Neither carries a status. character-cost was already read at the header -> O16: mark the failure with withBilledUsage({ characters }), and on abort throw a CoaxAbortError carrying it.",
+    "billedWhenCutOff": "NOT documented whether ElevenLabs bills the full character-cost of a generation the client abandoned. GUESS: yes (the header is sent before the audio, as the bill of the request)."
+  }
+}

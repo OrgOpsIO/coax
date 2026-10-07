@@ -9,6 +9,7 @@ import {
   type ProviderResponse,
   type SpeakRequest,
   type SpeakResponse,
+  type SpeakStreamResponse,
   type StructuredRequest,
   type TextRequest,
   type ToolCall,
@@ -153,6 +154,21 @@ const AUDIO_MEDIA_TYPES: Record<AudioFormat, string> = {
   wav: "audio/wav",
   pcm: "audio/pcm",
 };
+
+/** The /audio/speech body, shared by `speak` and `speakStream`. */
+function speechBody(req: SpeakRequest, model: string, format: AudioFormat, defaultVoice?: string): Record<string, unknown> {
+  return {
+    model,
+    input: req.input,
+    // Endpoints differ on whether `voice` is optional; send the OpenAI default only as a fallback
+    // so a service with its own default voice still behaves. `language` is not sent: /audio/speech
+    // has no such field, the model reads the language from `input`.
+    voice: req.voice || defaultVoice || "alloy",
+    response_format: format,
+    ...(req.speed != null ? { speed: req.speed } : {}),
+    ...(req.instructions ? { instructions: req.instructions } : {}),
+  };
+}
 
 export function openai(opts: OpenAiOptions): Provider {
   let client: AnyClient | undefined = opts.client as AnyClient | undefined;
@@ -397,21 +413,31 @@ export function openai(opts: OpenAiOptions): Provider {
       const c = await getClient();
       const format = req.format ?? "mp3";
       const model = opts.speakModel ?? opts.model;
-      const resp = await c.audio.speech.create(
-        {
-          model,
-          input: req.input,
-          // Endpoints differ on whether `voice` is optional; send the OpenAI default only as a fallback
-          // so a service with its own default voice still behaves. `language` is not sent: /audio/speech
-          // has no such field, the model reads the language from `input`.
-          voice: req.voice || opts.voice || "alloy",
-          response_format: format,
-          ...(req.speed != null ? { speed: req.speed } : {}),
-          ...(req.instructions ? { instructions: req.instructions } : {}),
-        },
-        requestOptions(req.headers, req.signal),
-      );
+      const resp = await c.audio.speech.create(speechBody(req, model, format, opts.voice), requestOptions(req.headers, req.signal));
       return { audio: new Uint8Array(await resp.arrayBuffer()), mediaType: AUDIO_MEDIA_TYPES[format], usage: emptyUsage(), model };
+    },
+
+    async speakStream(req: SpeakRequest): Promise<SpeakStreamResponse> {
+      const c = await getClient();
+      const format = req.format ?? "mp3";
+      const model = opts.speakModel ?? opts.model;
+      // The same request as `speak`: the raw /audio/speech body is chunked as it is generated. No `stream_format`
+      // (SSE): it would need its own parser and serves gpt-4o-mini-tts only (decisions/stage-03-openai-speak-stream.md).
+      const resp = await c.audio.speech.create(speechBody(req, model, format, opts.voice), requestOptions(req.headers, req.signal));
+      async function* audio(): AsyncGenerator<Uint8Array, Usage, void> {
+        let bytes = 0;
+        if (resp.body) {
+          for await (const chunk of resp.body) {
+            if (!chunk.byteLength) continue;
+            bytes += chunk.byteLength;
+            yield chunk;
+          }
+        }
+        if (bytes === 0) throw new Error("coax: openai returned no audio");
+        // The wire reports no usage for speech, as for `speak`.
+        return emptyUsage();
+      }
+      return { mediaType: AUDIO_MEDIA_TYPES[format], model, audio: audio() };
     },
   };
 }

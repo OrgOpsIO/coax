@@ -309,7 +309,9 @@ connection, but by its own documentation the service is not cancelled and may st
 A second one, on ElevenLabs: its SDK arms a 240-second timer for every request and does not clear it when
 the request is aborted or the connection drops. The call still fails at once, but a script, CLI or
 serverless function stays alive until that timer runs out. A long-running server never notices; a
-short-lived process ends with `process.exit()` after such a call.
+short-lived process ends with `process.exit()` after such a call. This holds only until ElevenLabs answers:
+once the answer has started (a speech is streaming, a body is arriving), the SDK has cleared the timer, and
+stopping it leaves nothing behind.
 
 ### Failed runs still cost tokens
 
@@ -321,7 +323,8 @@ abort happened inside `ai.run()`, so an aborted run is exactly as resumable as o
 
 A failed call that the vendor still billed is booked the same way, whichever provider raised it: a refusal
 (`CoaxRefusalError` carries its `usage`), a Gemini turn that ended without a usable answer, an embedding
-batch cut short after some inputs, an ElevenLabs speech billed in characters that came back without audio. `onUsage` sees each once, `billedUsage(err)` returns what the failed
+batch cut short after some inputs, an ElevenLabs speech billed in characters that came back without audio, an
+ElevenLabs speech cut off after it was billed (a dropped connection, an abort). `onUsage` sees each once, `billedUsage(err)` returns what the failed
 call cost, and inside `ai.run()` or `ai.loop()` it counts toward the budget (and toward the run's usage). Such an attempt that coax retried
 is added to the `usage` of the call that finally succeeds (or rides on the error that finally escapes). A provider
 of your own marks such an error with `withBilledUsage(err, usage)`. The `onUsage` hook and any `Budget` see
@@ -370,8 +373,8 @@ try {
   prior turns from cache instead of re-billing the whole transcript.
 - **Streaming** — every surface streams: `ai.stream()` yields text deltas, `ai.streamObject()` partial
   objects while the model writes (validate→repair on the final result), `ai.runStream()` live run
-  events (deltas, tool calls, tool results). Model fallback still covers a primary that dies before
-  its first token.
+  events (deltas, tool calls, tool results), `ai.speakStream()` audio chunks. Model fallback still covers
+  a primary that dies before its first token.
 - **Embeddings** — `ai.embed()` returns one vector per input, through the same alias/fallback/usage
   plumbing as every other call (`embedModel` names the model per endpoint; on Google the model reference does).
 - **Tools** — `ai.run()` hands the model typed tools and runs the whole call/validate/reply loop. With
@@ -381,8 +384,9 @@ try {
 - **Usage** — one `onUsage(usage, meta)` hook across every call, plus summed `usage` on each result, in
   each vendor's billing unit (tokens, characters, audio seconds).
 - **Vision** — image/pdf media are first-class.
-- **Voice** — `ai.transcribe()` / `ai.speak()` on ElevenLabs and on any OpenAI-wire endpoint that serves
-  them, with a precise error where it doesn't.
+- **Voice** — `ai.transcribe()` / `ai.speak()` / `ai.speakStream()` on ElevenLabs and on any OpenAI-wire
+  endpoint that serves them, with a precise error where it doesn't; `ai.transcribeToken()` hands the browser
+  a single-use token for realtime listening on ElevenLabs, so the key stays on the server.
 - **Reasoning effort** — `reasoningEffort: "none" | "low" | "medium" | "high"` per call, per model alias,
   or as a default; mapped to each provider's native wire field, sent only where set.
 - **`extraBody`** — a generic, un-whitelisted escape hatch into the wire body, per endpoint and per call,
@@ -480,6 +484,7 @@ configure({
   },
   models: {
     ears: "elevenlabs:scribe_v2",
+    listen: "elevenlabs:scribe_v2_realtime",
     mouth: { use: "elevenlabs:eleven_flash_v2_5", fallback: "openai:gpt-4o-mini-tts" },
     smart: "anthropic:claude-opus-4-8",
   },
@@ -492,6 +497,52 @@ const { audio, mediaType } = await ai.speak({ model: "mouth", input: answer.text
 
 Point the same three calls at your own `local` gateway and you have a voice assistant that never leaves
 your own server.
+
+**Streamed speech.** `ai.speakStream()` takes the same call as `ai.speak()` and hands the audio out as the
+vendor sends it:
+
+```ts
+const { audio, mediaType } = await ai.speakStream({ model: "mouth", input: answer.text, signal: ac.signal });
+res.setHeader("content-type", mediaType);
+for await (const chunk of audio) res.write(chunk);   // the first bytes play while the rest is generated
+res.end();
+```
+
+It resolves once the first chunk is in, so retries and the fallback cover a vendor that fails before any
+audio; after that the speech is committed. The chunks are slices of one file in `mediaType`, cut wherever the
+network cut them. ElevenLabs bills a speech when it starts: `usage.characters` on `result` and through
+`onUsage`, present when the vendor reports it. Stop a speech early with the `signal`: the connection closes,
+and what was billed reaches `onUsage` and rides on the `CoaxAbortError`. A `break` out of the loop closes the
+connection too, but books nothing. On the OpenAI wire the audio streams as it is generated, with no usage, as
+`speak()`.
+
+**Listening in realtime.** The browser streams the microphone straight to ElevenLabs. coax's part is the
+token, issued on the server:
+
+```ts
+app.post("/v1/listen", async (c) => {
+  const { token, model, url } = await ai.transcribeToken({ model: "listen" });
+  return c.json({ token, model, url });
+});
+```
+
+The browser half, with ElevenLabs' own `@elevenlabs/client` (not a coax dependency — coax ships no browser
+code):
+
+```ts
+import { Scribe, RealtimeEvents, CommitStrategy } from "@elevenlabs/client";
+
+const { token, model, url } = await (await fetch("/v1/listen", { method: "POST" })).json();
+const scribe = Scribe.connect({ token, modelId: model, baseUri: new URL(url).origin, commitStrategy: CommitStrategy.VAD, microphone: { echoCancellation: true } });
+scribe.on(RealtimeEvents.COMMITTED_TRANSCRIPT, (t) => ask(t.text));
+```
+
+The token is single-use and lives 15 minutes (the vendor's rule), and the key never leaves the server. `url`
+is the realtime endpoint of the host that issued the token, so a residency endpoint hands out its own.
+`onUsage` sees each issued token once, with zero units: the session itself is billed by ElevenLabs by audio
+duration, and coax never sees it — no realtime message carries usage. On the OpenAI wire `transcribeToken`
+raises `CoaxUnsupportedError`: its realtime secret can be used more than once until it expires, so it is not
+single-use.
 
 **Voices** are the vendor's ids — ElevenLabs ids from its voice library or API, OpenAI's names (`alloy`,
 `nova`). Set a default `voice` on the endpoint, as above: the `ai.speak()` line then stays the same on
@@ -629,7 +680,7 @@ const { text, calls, usage } = await result;   // the same RunResult run() retur
 ```
 
 Every surface of coax streams: `stream()` for text, `streamObject()` for typed data, `runStream()`
-for agents. All three share the same contract — fallback until the first event, committed after,
+for agents, `speakStream()` for speech (see Voice). All four share the same contract — fallback until the first event, committed after,
 `result` once drained.
 
 ### Vision
@@ -701,10 +752,43 @@ app.post("/v1/assistant", async (c) => {
 Three boundaries stay intact: the browser holds no key, the model holds no credentials, and the gateway
 still sees who is asking.
 
+The same loop, streamed both ways: the browser listens with a realtime token (`/v1/listen` under Voice) and
+posts each committed transcript; the server runs the agent and speaks its answer sentence by sentence while
+the model is still writing it.
+
+```ts
+app.post("/v1/talk", async (req, res) => {
+  const ac = new AbortController();
+  res.on("close", () => ac.abort());   // the user talks over the answer → the run and the speech stop (barge-in)
+
+  const say = async (sentence: string) => {
+    const { audio } = await ai.speakStream({ model: "mouth", input: sentence, format: "mp3", signal: ac.signal });
+    for await (const chunk of audio) res.write(chunk);
+  };
+
+  res.setHeader("content-type", "audio/mpeg");
+  const { events } = await ai.runStream({ model: "smart", prompt: req.body.text, tools, signal: ac.signal });
+  let buffer = "";
+  for await (const e of events) {
+    if (e.type !== "delta") continue;
+    buffer += e.text;
+    for (let end = buffer.search(/[.!?]\s/); end >= 0; end = buffer.search(/[.!?]\s/)) {
+      await say(buffer.slice(0, end + 1));
+      buffer = buffer.slice(end + 2);
+    }
+  }
+  if (buffer.trim()) await say(buffer);   // the rest, at the end
+  res.end();
+});
+```
+
+Each sentence is its own speech: its own request and its own bill. `mp3` and `pcm` concatenate cleanly into
+one response; `wav` carries a header per speech. The abort books what was already spoken.
+
 ## Design
 
 Small and unopinionated. The only vendor-specific surface is the `Provider` interface: `structured` and
-`text` are required, `tools` / `transcribe` / `speak` are optional capabilities an endpoint either serves
+`text` are required, `tools` / `transcribe` / `speak` / `speakStream` / `transcribeToken` are optional capabilities an endpoint either serves
 or honestly doesn't. A voice-only vendor (ElevenLabs) implements `structured` and `text` by raising
 `CoaxUnsupportedError` — the same error as for any missing capability. Everything else — schema handling, aggressive parsing, the repair/retry/fallback
 loop, the tool driver, prompt files — is pure and unit-tested against fakes, no network. Zod is a peer

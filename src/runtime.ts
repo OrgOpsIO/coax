@@ -57,6 +57,8 @@ export const ai: AI = {
   loop: async (opts) => current().loop(opts),
   transcribe: async (call) => current().transcribe(call),
   speak: async (call) => current().speak(call),
+  speakStream: async (call) => current().speakStream(call),
+  transcribeToken: async (call) => current().transcribeToken(call),
   // Bind to the configured instance lazily on first call (config may be set after this module loads),
   // and cache the underlying prompt fn so the file is parsed once.
   prompt<T = string>(path: string, opts?: { schema?: ZodType<T>; model?: string }) {

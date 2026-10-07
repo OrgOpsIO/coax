@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
+import { ElevenLabs, ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createAI } from "../src/ai";
 import { CoaxAbortError, CoaxUnsupportedError } from "../src/client";
@@ -15,6 +15,11 @@ const STT_REQ = fixture("stt-convert.request"); // MEASURED multipart wire of sp
 const STT_RES = fixture("stt-convert.response"); // VERBATIM doc bodies + one COMPOSED full body
 const STT_OTHER = fixture("stt-other-shapes.response"); // multichannel / webhook / silence
 const ERRORS = fixture("errors"); // documented error envelopes + MEASURED SDK error classes
+// Stage 3 (copies of .ziv/reference/fixtures/stage-03, each names its source inside).
+const STREAM_REQ = fixture("tts-stream.request"); // MEASURED wire of textToSpeech.stream
+const STREAM_RES = fixture("tts-stream.response"); // MEASURED chunking; character-cost on /stream a GUESS
+const STREAM_ERR = fixture("tts-stream-errors"); // MEASURED: HTTP errors before audio, undici errors mid-body
+const TOKEN = fixture("single-use-token"); // VERBATIM + MEASURED single-use token call
 
 type Seen = { url: string; method?: string; headers: Record<string, string>; body?: unknown; form?: [string, unknown][] };
 
@@ -23,7 +28,7 @@ const AUDIO = hex(TTS_RES.fixture.bodyBytesHex as string);
 
 /** A fetch that records what the SDK sent and answers with `reply`. Like real fetch, it rejects at once
  *  on an already-aborted signal and when the signal aborts mid-request (stage 1, O11). */
-function stub(reply: (n: number) => Response | Promise<Response>) {
+function stub(reply: (n: number, signal?: AbortSignal | null) => Response | Promise<Response>) {
   const seen: Seen[] = [];
   const fetch = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const entry: Seen = { url: String(url), method: init?.method, headers: Object.fromEntries(new Headers(init?.headers).entries()) };
@@ -37,7 +42,7 @@ function stub(reply: (n: number) => Response | Promise<Response>) {
     if (signal?.aborted) throw abortError();
     return await new Promise<Response>((resolve, reject) => {
       signal?.addEventListener("abort", () => reject(abortError()), { once: true });
-      Promise.resolve(reply(seen.length)).then(resolve, reject);
+      Promise.resolve(reply(seen.length, signal)).then(resolve, reject);
     });
   };
   // timeoutInSeconds 1: the SDK arms its timer on every request and does not clear it on abort — a short
@@ -456,5 +461,444 @@ describe("elevenlabs errors, retries and abort through the real SDK", () => {
     setTimeout(() => ac.abort(), 5);
     await expect(call).rejects.toBeInstanceOf(CoaxAbortError);
     expect(fallbackCalls).toBe(0);
+  });
+});
+
+// ---- Stage 3: speech billed at the header (O16), streamed speech, realtime tokens ----
+
+// The character-cost the fixture carries; its value string also holds the GUESS note, so the number is its prefix.
+const COST = String(STREAM_RES.fixture.headers["character-cost"]).trim().split(/\s/)[0]!;
+const CHUNKS = (STREAM_RES.fixture.chunks as { bytes: number }[]).map((c, i) => new Uint8Array(c.bytes).fill(i + 1));
+const concat = (parts: Uint8Array[]) => Uint8Array.from(parts.flatMap((p) => Array.from(p)));
+
+/** undici's error on a connection dropped mid-body (tts-stream-errors.json connectionDroppedMidBody, MEASURED). */
+function terminated(): TypeError {
+  const e = STREAM_ERR.fixture.connectionDroppedMidBody.error;
+  return Object.assign(new TypeError(e.message), { cause: Object.assign(new Error(e.cause.message), { name: e.cause.name, code: e.cause.code }) });
+}
+
+type BodyState = { cancelled: boolean; pulls: number; dropped?: TypeError };
+
+/**
+ * A response body that streams the way undici's does: one chunk per read, then `end` — "close" ends it, "drop"
+ * errors it with undici's "terminated" TypeError, "hang" calls `onHang` and waits. When the fetch's signal aborts,
+ * the body errors with undici's DOMException AbortError (abortAfterHeaderMidBody, MEASURED). `cancel` records that
+ * the reader cancelled it — what closes the connection.
+ */
+function body(chunks: Uint8Array[], end: "close" | "drop" | "hang", signal?: AbortSignal | null, onHang?: () => void) {
+  const state: BodyState = { cancelled: false, pulls: 0 };
+  const abortMessage = STREAM_ERR.fixture.abortAfterHeaderMidBody.error.message as string;
+  let i = 0;
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        signal?.addEventListener(
+          "abort",
+          () => {
+            try {
+              controller.error(new DOMException(abortMessage, "AbortError"));
+            } catch {
+              // already closed
+            }
+          },
+          { once: true },
+        );
+      },
+      async pull(controller) {
+        state.pulls++;
+        if (i < chunks.length) return controller.enqueue(chunks[i++]!);
+        if (end === "close") return controller.close();
+        if (end === "drop") return controller.error((state.dropped = terminated()));
+        onHang?.();
+        if (!signal?.aborted) await new Promise<void>((r) => signal?.addEventListener("abort", () => r(), { once: true }));
+      },
+      cancel() {
+        state.cancelled = true;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return { stream, state };
+}
+
+/** A stub whose every reply is a 200 audio response with `body(chunks, end)`; the bodies' states are kept. */
+function streamStub(chunks: Uint8Array[], end: "close" | "drop" | "hang", headers: Record<string, string> = { "character-cost": COST }, onHang?: () => void) {
+  const bodies: BodyState[] = [];
+  const s = stub((_n, signal) => {
+    const b = body(chunks, end, signal, onHang);
+    bodies.push(b.state);
+    return new Response(b.stream, { status: 200, headers: { "content-type": "audio/mpeg", ...headers } });
+  });
+  return { ...s, bodies };
+}
+
+/** createAI over a primary client and, optionally, a fallback client (alias `mouth` / `listen`), recording onUsage. */
+function voiceAI(primary: ElevenLabsClient, fallback?: ElevenLabsClient, baseURL?: string) {
+  const usages: { usage: Usage; fallback?: boolean; purpose?: string; model: string }[] = [];
+  const ai = createAI({
+    providers: {
+      elevenlabs: (m) => elevenlabs({ model: m, client: primary, voice: VOICE, baseURL }),
+      ...(fallback ? { backup: (m: string) => elevenlabs({ model: m, client: fallback, voice: VOICE }) } : {}),
+    },
+    models: fallback
+      ? {
+          mouth: { use: "elevenlabs:eleven_flash_v2_5", fallback: "backup:eleven_flash_v2_5" },
+          listen: { use: "elevenlabs:scribe_v2_realtime", fallback: "backup:scribe_v2_realtime" },
+        }
+      : undefined,
+    defaults: { retries: { attempts: 3, initialDelayMs: 1 } },
+    onUsage: (usage, meta) => void usages.push({ usage, fallback: meta.fallback, purpose: meta.purpose, model: meta.model }),
+  });
+  return { ai, usages };
+}
+
+async function drainAudio(audio: AsyncIterable<Uint8Array>, onChunk?: (n: number) => void): Promise<{ got: Uint8Array[]; err?: unknown }> {
+  const got: Uint8Array[] = [];
+  try {
+    for await (const c of audio) {
+      got.push(c);
+      onChunk?.(got.length);
+    }
+    return { got };
+  } catch (err) {
+    return { got, err };
+  }
+}
+
+describe("elevenlabs speak: billed at the header (O16, real SDK)", () => {
+  it("a body dropped after the header is undici's TypeError, marked with the billed characters, reported once, never retried", async () => {
+    const s = streamStub([CHUNKS[0]!], "drop");
+    const { ai, usages } = voiceAI(s.client);
+    const err = await ai.speak({ model: "elevenlabs:eleven_flash_v2_5", input: "Hello there." }).catch((e: unknown) => e);
+    expect(err).toBe(s.bodies[0]!.dropped);
+    expect((err as TypeError).message).toBe("terminated");
+    expect(((err as TypeError).cause as { code?: string }).code).toBe("UND_ERR_SOCKET");
+    expect(billedUsage(err)).toStrictEqual({ ...zeros, characters: 12 });
+    expect(usages.map((u) => u.usage)).toStrictEqual([{ ...zeros, characters: 12 }]);
+    expect(s.seen).toHaveLength(1);
+  });
+
+  it("an abort mid-body is the provider's CoaxAbortError carrying the billed characters, reported once, no retry, no fallback", async () => {
+    const ac = new AbortController();
+    const s = streamStub([CHUNKS[0]!], "hang", undefined, () => ac.abort());
+    const backup = stub(audioReply());
+    const { ai, usages } = voiceAI(s.client, backup.client);
+    const err = await ai.speak({ model: "mouth", input: "Hello there.", signal: ac.signal }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CoaxAbortError);
+    expect((err as CoaxAbortError).usage).toStrictEqual({ ...zeros, characters: 12 });
+    expect(billedUsage(err)).toStrictEqual((err as CoaxAbortError).usage);
+    expect(((err as CoaxAbortError).cause as DOMException).name).toBe("AbortError");
+    expect(usages.map((u) => u.usage)).toStrictEqual([{ ...zeros, characters: 12 }]);
+    expect(s.seen).toHaveLength(1);
+    expect(backup.seen).toHaveLength(0);
+  });
+
+  it("a body dropped without the header carries no mark and reports nothing", async () => {
+    const s = streamStub([CHUNKS[0]!], "drop", {});
+    const { ai, usages } = voiceAI(s.client);
+    const err = await ai.speak({ model: "elevenlabs:eleven_flash_v2_5", input: "Hello there." }).catch((e: unknown) => e);
+    expect((err as TypeError).message).toBe("terminated");
+    expect(billedUsage(err)).toBeUndefined();
+    expect(usages).toHaveLength(0);
+  });
+
+  it("an abort mid-body without the header is a CoaxAbortError with zero usage and no mark", async () => {
+    const ac = new AbortController();
+    const s = streamStub([CHUNKS[0]!], "hang", {}, () => ac.abort());
+    const { ai, usages } = voiceAI(s.client);
+    const err = await ai.speak({ model: "elevenlabs:eleven_flash_v2_5", input: "Hi.", signal: ac.signal }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CoaxAbortError);
+    expect((err as CoaxAbortError).usage).toStrictEqual(zeros);
+    expect(billedUsage(err)).toBeUndefined();
+    expect(usages).toHaveLength(0);
+  });
+
+  it("a body that streams in several chunks is read whole", async () => {
+    const s = streamStub(CHUNKS, "close");
+    const res = await elevenlabs({ model: "eleven_flash_v2_5", client: s.client, voice: VOICE }).speak!({ input: "Hello there." });
+    expect(Array.from(res.audio)).toStrictEqual(Array.from(concat(CHUNKS)));
+    expect(res.usage).toStrictEqual({ ...zeros, characters: 12 });
+  });
+});
+
+describe("elevenlabs speakStream through the real SDK", () => {
+  const ERR = STREAM_ERR.fixture.httpErrorBeforeAudio;
+
+  it("sends the measured wire: /stream with output_format, the same JSON body as convert, merged headers, the key", async () => {
+    const s = streamStub(CHUNKS, "close");
+    const wire = STREAM_REQ.fixture.wire;
+    const params = STREAM_REQ.fixture.sdkParams;
+    const p = elevenlabs({ model: params.request.modelId, client: s.client, headers: { a: "1", "x-call": "0" } });
+    const res = await p.speakStream!({ input: params.request.text, voice: params.voiceId, language: "en", speed: 1.1, headers: params.requestOptions.headers });
+    await drainAudio(res.audio);
+    expect(s.seen).toHaveLength(1);
+    expect(s.seen[0]!.url).toBe(`https://api.elevenlabs.io${wire.path}`);
+    expect(s.seen[0]!.method).toBe(wire.method);
+    expect(s.seen[0]!.body).toStrictEqual(wire.body);
+    expect(s.seen[0]!.headers["xi-api-key"]).toBe("test-key");
+    expect(s.seen[0]!.headers["x-call"]).toBe("1");
+    expect(s.seen[0]!.headers.a).toBe("1");
+  });
+
+  it("format pcm asks for pcm_24000 and is audio/pcm", async () => {
+    const s = streamStub(CHUNKS, "close");
+    const res = await elevenlabs({ model: "eleven_flash_v2_5", client: s.client, voice: VOICE }).speakStream!({ input: "Hi.", format: "pcm" });
+    expect(new URL(s.seen[0]!.url).searchParams.get("output_format")).toBe("pcm_24000");
+    expect(res.mediaType).toBe("audio/pcm");
+  });
+
+  it("yields the chunks as they arrive, in order; mediaType is known before the first chunk (assumption: /stream sends character-cost, smoke S3.1)", async () => {
+    const s = streamStub(CHUNKS, "close");
+    const { ai, usages } = voiceAI(s.client);
+    const opened = await ai.speakStream({ model: "elevenlabs:eleven_flash_v2_5", input: "Hello there." });
+    expect(opened.mediaType).toBe("audio/mpeg");
+    const { got, err } = await drainAudio(opened.audio);
+    expect(err).toBeUndefined();
+    expect(got).toHaveLength(3);
+    expect(Array.from(concat(got))).toStrictEqual(Array.from(concat(CHUNKS)));
+    expect(await opened.result).toStrictEqual({ mediaType: "audio/mpeg", usage: { ...zeros, characters: 12 }, model: "eleven_flash_v2_5" });
+    expect(usages).toStrictEqual([{ usage: { ...zeros, characters: 12 }, fallback: false, purpose: "speakStream", model: "eleven_flash_v2_5" }]);
+  });
+
+  it("the provider resolves at the header, before any chunk was read", async () => {
+    const s = streamStub(CHUNKS, "close");
+    const res = await elevenlabs({ model: "eleven_flash_v2_5", client: s.client, voice: VOICE }).speakStream!({ input: "Hi." });
+    expect(res.mediaType).toBe("audio/mpeg");
+    expect(res.model).toBe("eleven_flash_v2_5");
+    expect(s.bodies[0]!.pulls).toBe(0);
+    await res.audio.return(zeros);
+  });
+
+  it("without the header the usage has no characters key — never estimated", async () => {
+    const s = streamStub(CHUNKS, "close", {});
+    const opened = await voiceAI(s.client).ai.speakStream({ model: "elevenlabs:eleven_flash_v2_5", input: "Hello there." });
+    await drainAudio(opened.audio);
+    expect((await opened.result).usage).toStrictEqual(zeros);
+  });
+
+  it("refuses what it cannot honour before the wire, with speak's messages", async () => {
+    const s = streamStub(CHUNKS, "close");
+    const p = elevenlabs({ model: "eleven_flash_v2_5", client: s.client });
+    await expect(p.speakStream!({ input: "Hi." })).rejects.toThrow(/needs a voice id/);
+    await expect(p.speakStream!({ input: "Hi.", voice: VOICE, instructions: "calm" })).rejects.toBeInstanceOf(CoaxUnsupportedError);
+    await expect(p.speakStream!({ input: "Hi.", voice: VOICE, format: "aac" })).rejects.toThrow(/does not support aac output/);
+    await expect(p.speakStream!({ input: "Hi.", voice: VOICE, speed: 1.3 })).rejects.toThrow(/between 0.7 and 1.2/);
+    expect(s.seen).toHaveLength(0);
+  });
+
+  for (const [status, attempts] of [
+    [401, 1],
+    [400, 1],
+    [429, 3],
+  ] as const) {
+    it(`a ${status} rejects ai.speakStream() itself, before it resolves (${attempts} request${attempts > 1 ? "s" : ""})`, async () => {
+      const s = stub(() => Response.json(ERR[String(status)].body, { status }));
+      const err = await voiceAI(s.client).ai.speakStream({ model: "elevenlabs:eleven_flash_v2_5", input: "Hi." }).catch((e: unknown) => e);
+      expect((err as { statusCode?: number }).statusCode).toBe(status);
+      expect(s.seen).toHaveLength(attempts);
+    });
+  }
+
+  it("an HTTP error before the audio goes to the alias' fallback", async () => {
+    const s = stub(() => Response.json(ERR["401"].body, { status: 401 }));
+    const backup = streamStub(CHUNKS, "close");
+    const { ai, usages } = voiceAI(s.client, backup.client);
+    const opened = await ai.speakStream({ model: "mouth", input: "Hi." });
+    expect((await drainAudio(opened.audio)).got).toHaveLength(3);
+    expect(backup.seen).toHaveLength(1);
+    expect(usages.map((u) => u.fallback)).toStrictEqual([true]);
+  });
+
+  it("an abort before the header is a CoaxAbortError with zero usage, reported nowhere", async () => {
+    const s = stub(() => new Promise<Response>(() => {}));
+    const { ai, usages } = voiceAI(s.client);
+    const ac = new AbortController();
+    const call = ai.speakStream({ model: "elevenlabs:eleven_flash_v2_5", input: "Hi.", signal: ac.signal });
+    setTimeout(() => ac.abort(), 5);
+    const err = await call.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CoaxAbortError);
+    expect((err as CoaxAbortError).usage).toStrictEqual(zeros);
+    expect(usages).toHaveLength(0);
+  });
+
+  it("an abort mid-body (O16): the iteration and result reject with the same CoaxAbortError carrying the billed characters, reported once", async () => {
+    const ac = new AbortController();
+    const s = streamStub(CHUNKS.slice(0, 2), "hang");
+    const { ai, usages } = voiceAI(s.client);
+    const opened = await ai.speakStream({ model: "elevenlabs:eleven_flash_v2_5", input: "Hello there.", signal: ac.signal });
+    const { got, err } = await drainAudio(opened.audio, (n) => n === 2 && ac.abort());
+    expect(got).toHaveLength(2);
+    expect(err).toBeInstanceOf(CoaxAbortError);
+    expect((err as CoaxAbortError).usage).toStrictEqual({ ...zeros, characters: 12 });
+    expect(billedUsage(err)).toStrictEqual({ ...zeros, characters: 12 });
+    await expect(opened.result).rejects.toBe(err);
+    expect(usages.map((u) => u.usage)).toStrictEqual([{ ...zeros, characters: 12 }]);
+  });
+
+  it("a connection dropped after the first chunk: the marked TypeError through the iteration and result, reported once, no fallback", async () => {
+    const s = streamStub(CHUNKS.slice(0, 2), "drop");
+    const backup = streamStub(CHUNKS, "close");
+    const { ai, usages } = voiceAI(s.client, backup.client);
+    const opened = await ai.speakStream({ model: "mouth", input: "Hello there." });
+    const { got, err } = await drainAudio(opened.audio);
+    expect(got).toHaveLength(2);
+    expect(err).toBe(s.bodies[0]!.dropped);
+    expect(billedUsage(err)).toStrictEqual({ ...zeros, characters: 12 });
+    await expect(opened.result).rejects.toBe(err);
+    expect(usages.map((u) => [u.usage, u.fallback])).toStrictEqual([[{ ...zeros, characters: 12 }, false]]);
+    expect(s.seen).toHaveLength(1);
+    expect(backup.seen).toHaveLength(0);
+  });
+
+  it("a 200 with the header and an empty body is 'returned no audio', marked; the fallback answers; onUsage sees both", async () => {
+    const s = streamStub([], "close");
+    const backup = streamStub(CHUNKS, "close");
+    const { ai, usages } = voiceAI(s.client, backup.client);
+    const opened = await ai.speakStream({ model: "mouth", input: "Hello there." });
+    expect((await drainAudio(opened.audio)).got).toHaveLength(3);
+    expect(usages.map((u) => [u.usage, u.fallback])).toStrictEqual([
+      [{ ...zeros, characters: 12 }, false],
+      [{ ...zeros, characters: 12 }, true],
+    ]);
+
+    const alone = streamStub([], "close");
+    const err = await voiceAI(alone.client).ai.speakStream({ model: "elevenlabs:eleven_flash_v2_5", input: "Hi." }).catch((e: unknown) => e);
+    expect((err as Error).message).toMatch(/elevenlabs returned no audio/);
+    expect(billedUsage(err)).toStrictEqual({ ...zeros, characters: 12 });
+    expect(alone.seen).toHaveLength(1);
+  });
+
+  it("a connection dropped before the first chunk goes to the fallback, the primary's bill reported first", async () => {
+    const s = streamStub([], "drop");
+    const backup = streamStub(CHUNKS, "close");
+    const { ai, usages } = voiceAI(s.client, backup.client);
+    const opened = await ai.speakStream({ model: "mouth", input: "Hello there." });
+    expect((await drainAudio(opened.audio)).got).toHaveLength(3);
+    expect(usages.map((u) => u.fallback)).toStrictEqual([false, true]);
+    expect(s.seen).toHaveLength(1);
+  });
+
+  it("an early break cancels the response body — the connection is closed (assumption O19: break reports nothing)", async () => {
+    const s = streamStub(CHUNKS, "close");
+    const { ai, usages } = voiceAI(s.client);
+    const opened = await ai.speakStream({ model: "elevenlabs:eleven_flash_v2_5", input: "Hello there." });
+    for await (const _ of opened.audio) break;
+    expect(s.bodies[0]!.cancelled).toBe(true);
+    expect(usages).toHaveLength(0);
+  });
+
+  it("an injected client without textToSpeech.stream names the missing member", async () => {
+    const fake = { textToSpeech: { convert: () => ({ withRawResponse: () => Promise.reject(new Error("unused")) }) }, speechToText: { convert: async () => ({}) } };
+    await expect(elevenlabs({ model: "eleven_flash_v2_5", client: fake, voice: VOICE }).speakStream!({ input: "Hi." })).rejects.toThrow(
+      "coax: the ElevenLabs client passed as `client` has no textToSpeech.stream",
+    );
+  });
+});
+
+describe("elevenlabs transcribeToken through the real SDK", () => {
+  const T = TOKEN.fixture;
+  const tokenReply = () => Response.json(T.response200);
+
+  it("posts to /v1/single-use-token/realtime_scribe with no body, the key and the merged headers", async () => {
+    const s = stub(tokenReply);
+    const p = elevenlabs({ model: "scribe_v2_realtime", client: s.client, headers: { a: "1", b: "1" } });
+    await p.transcribeToken!({ headers: { b: "2" } });
+    expect(s.seen).toHaveLength(1);
+    expect(s.seen[0]!.url).toBe(`https://api.elevenlabs.io${T.wire.path}`);
+    expect(s.seen[0]!.method).toBe(T.wire.method);
+    expect(s.seen[0]!.body).toBeUndefined();
+    expect(s.seen[0]!.headers["xi-api-key"]).toBe("test-key");
+    expect(s.seen[0]!.headers.a).toBe("1");
+    expect(s.seen[0]!.headers.b).toBe("2");
+  });
+
+  it("returns the token, the realtime url, zero usage and the reference's model", async () => {
+    const s = stub(tokenReply);
+    const res = await voiceAI(s.client).ai.transcribeToken({ model: "elevenlabs:scribe_v2_realtime" });
+    expect(res).toStrictEqual({ token: "sutkn_1234567890", url: "wss://api.elevenlabs.io/v1/speech-to-text/realtime", usage: emptyUsage(), model: "scribe_v2_realtime" });
+  });
+
+  it("the url follows the endpoint's baseURL: residency host, trailing slash, plain http", async () => {
+    const cases = [
+      ["https://api.eu.residency.elevenlabs.io", "wss://api.eu.residency.elevenlabs.io/v1/speech-to-text/realtime"],
+      ["https://api.us.elevenlabs.io/", "wss://api.us.elevenlabs.io/v1/speech-to-text/realtime"],
+      ["http://localhost:8080", "ws://localhost:8080/v1/speech-to-text/realtime"],
+    ] as const;
+    for (const [baseURL, url] of cases) {
+      const seen: string[] = [];
+      const fetch = async (u: string | URL | Request) => (seen.push(String(u)), tokenReply());
+      // A client built the way coax builds one from a baseURL, so the request goes to that host.
+      const client = new ElevenLabsClient({ apiKey: "test-key", maxRetries: 0, timeoutInSeconds: 1, baseUrl: baseURL, fetch: fetch as typeof globalThis.fetch });
+      const res = await elevenlabs({ model: "scribe_v2_realtime", client, baseURL }).transcribeToken!({});
+      expect(new URL(seen[0]!).origin).toBe(new URL(baseURL).origin);
+      expect(res.url).toBe(url);
+    }
+  });
+
+  it("a 401 is not retried, a 429 is, a 422 is the SDK's UnprocessableEntityError", async () => {
+    const denied = stub(() => Response.json(T.errors["401"].body, { status: 401 }));
+    const e401 = await voiceAI(denied.client).ai.transcribeToken({ model: "elevenlabs:scribe_v2_realtime" }).catch((e: unknown) => e);
+    expect((e401 as { statusCode?: number }).statusCode).toBe(401);
+    expect(denied.seen).toHaveLength(1);
+
+    const busy = stub(() => Response.json({ detail: { status: "rate_limited", message: "slow down" } }, { status: 429 }));
+    await voiceAI(busy.client).ai.transcribeToken({ model: "elevenlabs:scribe_v2_realtime" }).catch((e: unknown) => e);
+    expect(busy.seen).toHaveLength(3);
+
+    const invalid = stub(() => Response.json(T.errors["422"].body, { status: 422 }));
+    const e422 = await voiceAI(invalid.client).ai.transcribeToken({ model: "elevenlabs:scribe_v2_realtime" }).catch((e: unknown) => e);
+    expect(e422).toBeInstanceOf(ElevenLabs.UnprocessableEntityError);
+    expect((e422 as { statusCode?: number }).statusCode).toBe(422);
+  });
+
+  it("a 200 without a usable token is an error, not an empty token (measured: the SDK's own schema rejects {} and a non-string first)", async () => {
+    // .ziv/logs/stage-03/build/token-body-shapes.out: SDK 2.71.0 throws its ParseError for a missing or non-string
+    // token before coax sees the body; an empty string passes the SDK and stops at coax's guard.
+    const cases = [
+      [{}, /Missing required key "token"/],
+      [{ token: 7 }, /token: Expected string/],
+      [{ token: "" }, /^coax: elevenlabs returned no token$/],
+    ] as const;
+    for (const [reply, message] of cases) {
+      const s = stub(() => Response.json(reply));
+      const err = await elevenlabs({ model: "scribe_v2_realtime", client: s.client }).transcribeToken!({}).catch((e: unknown) => e);
+      expect((err as Error).message).toMatch(message);
+    }
+    // A client that hands coax the body as it is (no SDK schema): `{}` stops at coax's guard too.
+    const fake = { textToSpeech: { convert: () => undefined }, speechToText: { convert: () => undefined }, tokens: { singleUse: { create: async () => ({}) } } };
+    await expect(elevenlabs({ model: "scribe_v2_realtime", client: fake }).transcribeToken!({})).rejects.toThrow("coax: elevenlabs returned no token");
+  });
+
+  it("an abort is a CoaxAbortError", async () => {
+    const s = stub(() => new Promise<Response>(() => {}));
+    const ac = new AbortController();
+    const call = voiceAI(s.client).ai.transcribeToken({ model: "elevenlabs:scribe_v2_realtime", signal: ac.signal });
+    setTimeout(() => ac.abort(), 5);
+    await expect(call).rejects.toBeInstanceOf(CoaxAbortError);
+  });
+
+  it("onUsage fires once with zero units and never sees the token (assumption O18)", async () => {
+    const s = stub(tokenReply);
+    const args: unknown[] = [];
+    const ai = createAI({ providers: { elevenlabs: (m) => elevenlabs({ model: m, client: s.client }) }, onUsage: (...a) => void args.push(a) });
+    const res = await ai.transcribeToken({ model: "elevenlabs:scribe_v2_realtime" });
+    expect(args).toHaveLength(1);
+    expect((args[0] as [Usage])[0]).toStrictEqual(emptyUsage());
+    expect(JSON.stringify(args)).not.toContain(res.token);
+  });
+
+  it("is not served on the OpenAI wire: its realtime secret is not single-use", async () => {
+    const ai = createAI({ providers: { openai: "test-key" } });
+    const err = await ai.transcribeToken({ model: "openai:gpt-4o-transcribe" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CoaxUnsupportedError);
+    expect((err as CoaxUnsupportedError).provider).toBe("openai");
+    expect((err as CoaxUnsupportedError).capability).toBe("realtime transcription tokens");
+  });
+
+  it("an injected client without tokens names the missing member", async () => {
+    const fake = { textToSpeech: { convert: () => undefined }, speechToText: { convert: () => undefined } };
+    await expect(elevenlabs({ model: "scribe_v2_realtime", client: fake }).transcribeToken!({})).rejects.toThrow(
+      "coax: the ElevenLabs client passed as `client` has no tokens.singleUse.create",
+    );
   });
 });

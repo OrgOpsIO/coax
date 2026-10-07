@@ -259,6 +259,36 @@ export interface SpeakResponse {
   model: string;
 }
 
+/** What a streamed speech opens with, once the vendor accepted the request: status and headers are in, no
+ *  audio was read yet. */
+export interface SpeakStreamResponse {
+  /** The encoded audio in arrival order: together one file in `mediaType`, cut wherever the network cut it.
+   *  Returns what the call was billed when the audio has ended. */
+  audio: AsyncGenerator<Uint8Array, Usage, void>;
+  /** MIME type of the audio, derived from the requested format — known before the first chunk. */
+  mediaType: string;
+  model: string;
+}
+
+export interface TranscribeTokenRequest {
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+}
+
+/** A short-lived, single-use token with which a browser transcribes in realtime straight against the vendor,
+ *  so the key never leaves the server. */
+export interface TranscribeTokenResponse {
+  /** For the browser. Single use; the vendor sets its lifetime (ElevenLabs: 15 minutes). */
+  token: string;
+  /** The realtime endpoint the token belongs to (`wss://…`), following the endpoint's `baseURL`. */
+  url: string;
+  /** What issuing the token cost — zero units on ElevenLabs. The realtime session itself is billed by the
+   *  vendor by audio duration and never seen by coax. */
+  usage: Usage;
+  /** The model the browser names when it connects (ElevenLabs `model_id`). */
+  model: string;
+}
+
 /**
  * A provider is the only vendor-specific surface. `structured` (native constrained-output mode:
  * Anthropic tool_use, OpenAI json_schema) and `text` are required. The rest are optional capabilities:
@@ -298,6 +328,14 @@ export interface Provider {
   transcribe?(req: TranscribeRequest): Promise<TranscribeResponse>;
   /** Text-to-speech — backs `ai.speak()`. */
   speak?(req: SpeakRequest): Promise<SpeakResponse>;
+  /**
+   * Streamed text-to-speech — backs `ai.speakStream()`. Resolves once the vendor accepted the request (before
+   * any audio, so retries still apply), with the audio as a generator of chunks that returns the call's usage.
+   * Optional: without it, coax degrades to one `speak` call whose whole audio is one chunk.
+   */
+  speakStream?(req: SpeakRequest): Promise<SpeakStreamResponse>;
+  /** A single-use token for realtime transcription in the browser — backs `ai.transcribeToken()`. */
+  transcribeToken?(req: TranscribeTokenRequest): Promise<TranscribeTokenResponse>;
 }
 
 /**

@@ -14,11 +14,14 @@ import {
   type ReasoningEffort,
   type SpeakRequest,
   type SpeakResponse,
+  type SpeakStreamResponse,
   type ToolInvocation,
   type ToolsRequest,
   type ToolsResponse,
   type TranscribeRequest,
   type TranscribeResponse,
+  type TranscribeTokenRequest,
+  type TranscribeTokenResponse,
   type TranscriptWord,
   type Usage,
 } from "./types";
@@ -206,6 +209,12 @@ export interface Client {
   transcribe(req: TranscribeRequest): Promise<TranscribeResult>;
   /** Text-to-speech. Throws CoaxUnsupportedError where the endpoint has no speech synthesis. */
   speak(req: SpeakRequest): Promise<SpeakResult>;
+  /** Streamed text-to-speech: resolves once the vendor accepted the request. The audio generator reports
+   *  usage when drained. Providers without `speakStream` degrade to one `speak` call, yielded as one chunk. */
+  speakStream(req: SpeakRequest): Promise<SpeakStreamResponse>;
+  /** A single-use token for realtime transcription in the browser. Throws CoaxUnsupportedError where the
+   *  endpoint has none. */
+  transcribeToken(req: TranscribeTokenRequest): Promise<TranscribeTokenResponse>;
 }
 
 function toMessages(prompt: string | undefined, messages: Message[] | undefined): Message[] {
@@ -236,7 +245,7 @@ export function createClient(opts: ClientOptions): Client {
   }
 
   /** Resolve an optional provider capability, or fail with a message that names the missing piece. */
-  function capability<K extends "tools" | "transcribe" | "speak" | "embed">(key: K, label: string): NonNullable<Provider[K]> {
+  function capability<K extends "tools" | "transcribe" | "speak" | "embed" | "transcribeToken">(key: K, label: string): NonNullable<Provider[K]> {
     const fn = provider[key];
     if (!fn) throw new CoaxUnsupportedError(label, provider.name);
     return fn.bind(provider) as NonNullable<Provider[K]>;
@@ -479,6 +488,54 @@ export function createClient(opts: ClientOptions): Client {
       const res: SpeakResponse = await billed(req.signal, emptyUsage, () => capability("speak", "speech synthesis")(req));
       await onUsage?.(res.usage, res.model);
       return { audio: res.audio, mediaType: res.mediaType, usage: res.usage, model: res.model };
+    },
+
+    async speakStream(req: SpeakRequest): Promise<SpeakStreamResponse> {
+      // No native streaming on this provider → one speak call, its whole audio as one chunk.
+      if (!provider.speakStream) {
+        const res: SpeakResponse = await billed(req.signal, emptyUsage, () => capability("speak", "speech synthesis")(req));
+        await onUsage?.(res.usage, res.model);
+        return {
+          mediaType: res.mediaType,
+          model: res.model,
+          audio: (async function* () {
+            if (res.audio.byteLength) yield res.audio;
+            return res.usage;
+          })(),
+        };
+      }
+
+      const opened = await billed(req.signal, emptyUsage, () => provider.speakStream!(req));
+      async function* audio(): AsyncGenerator<Uint8Array, Usage, void> {
+        let finished = false;
+        try {
+          let cur = await opened.audio.next();
+          while (!cur.done) {
+            if (cur.value.byteLength > 0) yield cur.value;
+            cur = await opened.audio.next();
+          }
+          finished = true;
+          await onUsage?.(cur.value, opened.model);
+          return cur.value;
+        } catch (err) {
+          finished = true;
+          // Same normalization as `stream()` — around iteration, so a mid-speech abort lands here too.
+          const failure = req.signal?.aborted ? abortedBy(emptyUsage(), err) : err;
+          await reportBilled(failure);
+          throw failure;
+        } finally {
+          // The consumer stopped early: close the provider's stream and with it the connection (an open one
+          // holds a vendor concurrency slot). Nothing is reported for it (O19).
+          if (!finished) await opened.audio.return(emptyUsage());
+        }
+      }
+      return { mediaType: opened.mediaType, model: opened.model, audio: audio() };
+    },
+
+    async transcribeToken(req: TranscribeTokenRequest): Promise<TranscribeTokenResponse> {
+      const res = await billed(req.signal, emptyUsage, () => capability("transcribeToken", "realtime transcription tokens")(req));
+      await onUsage?.(res.usage, res.model);
+      return { token: res.token, url: res.url, usage: res.usage, model: res.model };
     },
   };
 }

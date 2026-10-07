@@ -25,8 +25,12 @@ vi.mock("@elevenlabs/elevenlabs-js", () => {
           return { data: new Response(new Uint8Array([1, 2, 3])).body, rawResponse: { headers: new Headers({ "character-cost": "3" }) } };
         },
       }),
+      stream: () => ({
+        withRawResponse: async () => ({ data: new Response(new Uint8Array([1, 2, 3])).body, rawResponse: { headers: new Headers({ "character-cost": "3" }) } }),
+      }),
     };
     speechToText = { convert: async () => ({ text: "hi", audioDurationSecs: 1 }) };
+    tokens = { singleUse: { create: async () => ({ token: "sutkn_test" }) } };
   }
   return { ElevenLabsClient };
 });
@@ -127,6 +131,18 @@ describe("elevenlabs is voice only — no SDK load for what it does not serve", 
     expect(sdk.constructed).toEqual([]);
   });
 
+  it("speakStream's checks before the wire load nothing either, and neither does building a provider for a token (stage 3)", async () => {
+    const p = elevenlabs({ model: "eleven_flash_v2_5", apiKey: "k" });
+    await expect(p.speakStream!({ input: "hi" })).rejects.toThrow(/needs a voice id/);
+    await unsupported(p.speakStream!({ input: "hi", voice: "v", instructions: "calm" }), "delivery instructions (`instructions`)");
+    await unsupported(p.speakStream!({ input: "hi", voice: "v", format: "flac" }), "flac output");
+    await expect(p.speakStream!({ input: "hi", voice: "v", speed: 1.3 })).rejects.toThrow(/between 0.7 and 1.2/);
+    elevenlabs({ model: "scribe_v2_realtime", apiKey: "k" });
+    createAI({ providers: { elevenlabs: "k" } });
+    expect(sdk.loads).toBe(0);
+    expect(sdk.constructed).toEqual([]);
+  });
+
   it("the first speak loads the SDK once, with the key, no SDK retries and no headers in the constructor", async () => {
     const p = elevenlabs({ model: "eleven_flash_v2_5", apiKey: "k", voice: "v", headers: { a: "1" } });
     await p.speak!({ input: "hi" });
@@ -148,6 +164,16 @@ describe("elevenlabs is voice only — no SDK load for what it does not serve", 
     const p = elevenlabs({ model: "scribe_v2", apiKey: "k", baseURL: "https://api.eu.residency.elevenlabs.io" });
     await p.transcribe!({ audio: { data: new Uint8Array([1]) } });
     expect(sdk.constructed).toStrictEqual([{ apiKey: "k", maxRetries: 0, baseUrl: "https://api.eu.residency.elevenlabs.io" }]);
+  });
+
+  it("ai.transcribeToken constructs the client only when called, from the key, with the residency host (stage 3)", async () => {
+    sdk.constructed.length = 0;
+    const ai = createAI({ providers: { labs: { api: "elevenlabs", apiKey: "k", baseURL: "https://api.eu.residency.elevenlabs.io" } } });
+    expect(sdk.constructed).toEqual([]);
+    const res = await ai.transcribeToken({ model: "labs:scribe_v2_realtime" });
+    expect(res).toStrictEqual({ token: "sutkn_test", url: "wss://api.eu.residency.elevenlabs.io/v1/speech-to-text/realtime", usage: emptyUsage(), model: "scribe_v2_realtime" });
+    expect(sdk.constructed).toStrictEqual([{ apiKey: "k", maxRetries: 0, baseUrl: "https://api.eu.residency.elevenlabs.io" }]);
+    expect(sdk.loads).toBe(1);
   });
 });
 
@@ -201,6 +227,15 @@ describe("elevenlabs configuration", () => {
     expect(typeof wrapped.transcribe).toBe("function");
     expect(wrapped.tools).toBeUndefined();
     expect(wrapped.embed).toBeUndefined();
+  });
+
+  it("retrying() forwards speakStream and transcribeToken where the provider has them, and only there (stage 3)", () => {
+    const wrapped = retrying(elevenlabs({ model: "m", apiKey: "k" }));
+    expect(typeof wrapped.speakStream).toBe("function");
+    expect(typeof wrapped.transcribeToken).toBe("function");
+    const bare: Provider = { name: "bare", model: "m", structured: async () => ({ raw: {}, text: "{}", usage: emptyUsage(), model: "m" }), text: async () => ({ raw: "", text: "", usage: emptyUsage(), model: "m" }) };
+    expect("speakStream" in retrying(bare)).toBe(false);
+    expect("transcribeToken" in retrying(bare)).toBe(false);
   });
 
   it("OpenAI-wire keys are a type error on ElevenLabsEndpoint", () => {

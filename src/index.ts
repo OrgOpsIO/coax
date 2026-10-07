@@ -2,7 +2,7 @@
 export { configure, ai, isConfigured, reset } from "./runtime";
 // Explicit instance (recommended for libraries, tests, multiple configs).
 export { createAI } from "./ai";
-export type { AI, ObjectCall, TextCall, TextStream, ObjectStream, RunStream, DeepPartial, JudgeCall, Judgement, RunCall, EmbedCall, TranscribeCall, SpeakCall } from "./ai";
+export type { AI, ObjectCall, TextCall, TextStream, ObjectStream, RunStream, DeepPartial, JudgeCall, Judgement, RunCall, EmbedCall, TranscribeCall, SpeakCall, SpeakStream, SpeakStreamResult, TranscribeTokenCall } from "./ai";
 export type { AIConfig, ProviderConfig, ProvidersConfig, ProviderEndpoint, GoogleEndpoint, ElevenLabsEndpoint, ModelConfig, RetryConfig, CallDefaults, CallMeta } from "./config";
 export { parsePrompt, renderTemplate } from "./prompt-file";
 export type { ParsedPrompt, PromptMeta } from "./prompt-file";
@@ -49,6 +49,7 @@ export type {
   ReasoningEffort,
   SpeakRequest,
   SpeakResponse,
+  SpeakStreamResponse,
   StructuredRequest,
   TextRequest,
   ToolCall,
@@ -59,6 +60,8 @@ export type {
   ToolsResponse,
   TranscribeRequest,
   TranscribeResponse,
+  TranscribeTokenRequest,
+  TranscribeTokenResponse,
   TranscriptWord,
   Usage,
 } from "./types";

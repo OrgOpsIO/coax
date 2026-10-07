@@ -13,7 +13,7 @@ import type { Usage } from "../src/types";
 // vendors would write it. Response bodies follow the shapes in test/fixtures/elevenlabs/
 // (tts-convert.response, stt-convert.response a_minimal_rest_verbatim, openai-audio-usage.sdk).
 
-type Reply = (url: string) => Response | Promise<Response>;
+type Reply = (url: string, signal?: AbortSignal | null) => Response | Promise<Response>;
 
 /** Like real fetch: rejects at once on an already-aborted signal and when the signal aborts (stage 1, O11). */
 function stubFetch(reply: Reply) {
@@ -27,7 +27,7 @@ function stubFetch(reply: Reply) {
     if (signal?.aborted) throw abortError();
     return await new Promise<Response>((resolve, reject) => {
       signal?.addEventListener("abort", () => reject(abortError()), { once: true });
-      Promise.resolve(reply(String(url))).then(resolve, reject);
+      Promise.resolve(reply(String(url), signal)).then(resolve, reject);
     });
   };
   return { fetch: fetch as typeof globalThis.fetch, urls, signals };
@@ -147,6 +147,66 @@ describe.each(vendors)("voice contract on $name (same caller code)", (v) => {
     expect(err).toBeInstanceOf(CoaxUnsupportedError);
     expect((err as CoaxUnsupportedError).provider).toBe(v.name);
     expect(urls).toHaveLength(0);
+  });
+});
+
+/** A 200 speech whose body sends one chunk and then waits; the fetch's abort errors it as undici does. */
+const hangingSpeech: Reply = (_url, signal) => {
+  let sent = false;
+  const body = new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        signal?.addEventListener("abort", () => {
+          try {
+            controller.error(new DOMException("This operation was aborted", "AbortError"));
+          } catch {
+            // already closed
+          }
+        });
+      },
+      async pull(controller) {
+        if (!sent) return (sent = true), controller.enqueue(AUDIO);
+        if (!signal?.aborted) await new Promise<void>((r) => signal?.addEventListener("abort", () => r(), { once: true }));
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return new Response(body, { status: 200, headers: { "content-type": "audio/mpeg", "character-cost": "12" } });
+};
+
+// Stage 3 (T5): ai.speakStream, written once, on both vendors.
+describe.each(vendors)("streamed speech contract on $name (same caller code)", (v) => {
+  it("ai.speakStream yields the audio and resolves result with { mediaType, usage, model }, reported once", async () => {
+    const seen: Usage[] = [];
+    const { ai } = v.build(ok, (u) => void seen.push(u));
+    const { audio, mediaType, result } = await ai.speakStream({ model: v.speakModel, input: "Hello there.", format: "mp3" });
+    expect(mediaType).toBe("audio/mpeg");
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of audio) chunks.push(chunk);
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(chunks.flatMap((c) => Array.from(c))).toStrictEqual(Array.from(AUDIO));
+    const res = await result;
+    expect(Object.keys(res).sort()).toStrictEqual(["mediaType", "model", "usage"]);
+    expect(res.model).toBe(v.speakModel.split(":")[1]);
+    for (const k of TOKEN_KEYS) expect(typeof res.usage[k as keyof Usage]).toBe("number");
+    expect(seen).toStrictEqual([res.usage]);
+  });
+
+  it("a 401 rejects ai.speakStream() itself, before it resolves", async () => {
+    const denied = v.build(() => Response.json({ error: { message: "no" }, detail: { status: "invalid_api_key", message: "no" } }, { status: 401 }));
+    await expect(denied.ai.speakStream({ model: v.speakModel, input: "Hi." })).rejects.toBeInstanceOf(Error);
+    expect(denied.urls).toHaveLength(1);
+  });
+
+  it("an abort mid-body is a CoaxAbortError through the iteration", async () => {
+    const { ai } = v.build(hangingSpeech);
+    const ac = new AbortController();
+    const { audio, result } = await ai.speakStream({ model: v.speakModel, input: "Hi.", signal: ac.signal });
+    const err = await (async () => {
+      for await (const _ of audio) ac.abort();
+    })().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CoaxAbortError);
+    await expect(result).rejects.toBe(err);
   });
 });
 
