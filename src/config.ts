@@ -31,15 +31,40 @@ export interface ProviderEndpoint {
   /** OpenAI wire only: `strict: true` structured output — the schema shape is grammar-guaranteed by the
    *  endpoint. Opt-in; needs strict-compatible schemas. See `OpenAiOptions.strict`. */
   strict?: boolean;
+  /** Default voice for `ai.speak()` through this endpoint; a per-call `voice` wins. OpenAI wire: else "alloy". */
+  voice?: string;
+}
+
+/**
+ * ElevenLabs (voice only: `ai.speak()` and `ai.transcribe()`). Under any name other than `elevenlabs`,
+ * set `api: "elevenlabs"` — e.g. a data-residency account, which has its own key and host.
+ */
+export interface ElevenLabsEndpoint {
+  api?: "elevenlabs";
+  apiKey: string;
+  /** Host root, without `/v1` — e.g. "https://api.us.elevenlabs.io" or a data-residency host. Default: "https://api.elevenlabs.io". */
+  baseURL?: string;
+  /** Headers sent with every call to this endpoint. Per-call `headers` are merged over these. */
+  headers?: Record<string, string>;
+  /** Default voice id for `ai.speak()`; a per-call `voice` wins. ElevenLabs has no default voice of its own. */
+  voice?: string;
+  /** Not on ElevenLabs — name the model in the reference instead (`"elevenlabs:scribe_v2"`); here a type error. */
+  transcribeModel?: never;
+  speakModel?: never;
+  embedModel?: never;
+  tokenParam?: never;
+  strict?: never;
+  extraBody?: never;
 }
 
 /**
  * How a provider is configured. Either:
- *  - an API key string (for the built-in `anthropic` / `openai` providers),
- *  - a {@link ProviderEndpoint} — the way to reach your own OpenAI-/Anthropic-compatible server, or
+ *  - an API key string (for the built-in `anthropic` / `openai` / `elevenlabs` providers),
+ *  - a {@link ProviderEndpoint} — the way to reach your own OpenAI-/Anthropic-compatible server,
+ *  - an {@link ElevenLabsEndpoint} — ElevenLabs with more than a key (host, default voice, headers), or
  *  - a factory `(model) => Provider` to plug in ANY provider (Gemini, a local model, a mock in tests).
  */
-export type ProviderConfig = string | ProviderEndpoint | ((model: string) => Provider);
+export type ProviderConfig = string | ProviderEndpoint | ElevenLabsEndpoint | ((model: string) => Provider);
 
 /**
  * A model alias resolves to `"provider:model"`, optionally with a fallback model on failure and a
@@ -86,8 +111,8 @@ export interface CallMeta {
 }
 
 export interface AIConfig {
-  /** Provider keys/endpoints/factories. Keys `anthropic` and `openai` work from a bare API key; any
-   *  other name needs `api` (compatible endpoint) or a factory. */
+  /** Provider keys/endpoints/factories. Keys `anthropic`, `openai` and `elevenlabs` work from a bare
+   *  API key; any other name needs `api` (compatible endpoint or `"elevenlabs"`) or a factory. */
   providers: Record<string, ProviderConfig>;
   /** Named model aliases → "provider:model" (+ optional fallback). */
   models?: Record<string, ModelConfig>;

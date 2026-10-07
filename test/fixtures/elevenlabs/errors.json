@@ -1,0 +1,51 @@
+{
+  "source": "Thrown classes: MEASURED with the real @elevenlabs/elevenlabs-js 2.71.0 + stubbed fetch (.ziv/logs/stage-02/survey/probe-wire.mjs -> probe-wire.out, 2026-10-07); SDK errors/ElevenLabsError.js, errors/handleNonStatusCodeError.js, api/errors/UnprocessableEntityError, core/fetcher/Fetcher.js (abort branch). Error body envelope, types and codes: https://elevenlabs.io/docs/eleven-api/resources/errors (accessed 2026-10-07; the 422 list shape per https://elevenlabs.io/docs/api-reference/speech-to-text/convert). Bodies marked VERBATIM are copied from those pages; the others are COMPOSED in the documented envelope.",
+  "kind": "sdk-thrown-errors",
+  "fixture": {
+    "documentedEnvelope_VERBATIM": {
+      "status": 400,
+      "body": { "detail": { "type": "validation_error", "code": "invalid_parameters", "message": "The 'keyterms' parameter is only supported with the 'scribe_v2' model. You specified 'scribe_v1'.", "status": "invalid_parameters", "request_id": "3c807fc4c3a1705f9638ecc764a91c01", "param": "keyterms" } }
+    },
+    "validation422_shape_VERBATIM": {
+      "status": 422,
+      "body": { "detail": [{ "loc": ["body", "text"], "msg": "Field required", "type": "missing" }] },
+      "thrown": { "class": "UnprocessableEntityError (extends ElevenLabsError)", "statusCode": 422, "messageFirstLine": "UnprocessableEntityError" }
+    },
+    "unauthorized401": {
+      "status": 401,
+      "body": { "detail": { "type": "authentication_error", "code": "invalid_api_key", "message": "Invalid API key", "status": "invalid_api_key" } },
+      "thrown": { "class": "ElevenLabsError", "name": "ElevenLabsError", "statusCode": 401, "messageFirstLine": "Status code: 401", "body": "<the parsed JSON body>" }
+    },
+    "paymentRequired402": {
+      "status": 402,
+      "body": { "detail": { "type": "payment_required", "code": "insufficient_credits", "message": "<text>", "status": "insufficient_credits" } }
+    },
+    "rateLimited429": {
+      "status": 429,
+      "body": { "detail": { "type": "rate_limit_error", "code": "concurrent_limit_exceeded", "message": "<text>", "status": "concurrent_limit_exceeded" } },
+      "thrown": { "class": "ElevenLabsError", "statusCode": 429, "messageFirstLine": "Status code: 429" },
+      "otherCodes": ["rate_limit_exceeded", "system_busy"]
+    },
+    "serverError503": {
+      "status": 503,
+      "body": { "detail": { "type": "service_unavailable", "code": "<code>", "message": "<text>", "status": "<code>" } },
+      "thrown": { "class": "ElevenLabsError", "statusCode": 503 }
+    },
+    "aborted": {
+      "thrown": { "class": "ElevenLabsError", "name": "ElevenLabsError", "statusCode": null, "message": "The user aborted a request", "cause": "the fetch AbortError" }
+    },
+    "timedOut": {
+      "thrown": { "class": "ElevenLabsTimeoutError", "message": "Timeout exceeded when calling POST /v1/text-to-speech/{voice_id}." }
+    },
+    "documentedTypes": {
+      "validation_error": 400, "invalid_request": 400, "authentication_error": 401, "payment_required": 402, "authorization_error": 403,
+      "not_found": 404, "conflict": 409, "rate_limit_error": 429, "internal_error": 500, "service_unavailable": 503
+    },
+    "sttCodes": ["invalid_audio", "invalid_audio_format", "audio_too_long", "audio_too_short", "invalid_file_type", "unsupported_model", "request_too_large", "transcript_not_found"]
+  },
+  "expect": {
+    "transient": "coax isTransient() reads statusCode -> 408/409/429/5xx retried by retrying(); 400/401/402/403/404/422 not. Abort and timeout carry no statusCode -> not transient. NOTE: every rate_limit_error is 429, including quota-style ones; whether a quota/credits problem is 402 (not retried) or 429 is per the docs table above.",
+    "abort": "The SDK turns an abort into a plain ElevenLabsError without statusCode; coax's aborting() normalizes it to CoaxAbortError because signal.aborted is true.",
+    "message": "ElevenLabsError.message is 'Status code: N\\nBody: <pretty JSON>' - the vendor's own detail.message is inside .body.detail.message."
+  }
+}

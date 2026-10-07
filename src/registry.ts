@@ -1,8 +1,12 @@
-import type { AIConfig, ProviderEndpoint, RetryConfig } from "./config";
+import type { AIConfig, ElevenLabsEndpoint, ProviderEndpoint, RetryConfig } from "./config";
 import type { Provider, ReasoningEffort } from "./types";
 import { anthropic } from "./providers/anthropic";
+import { elevenlabs } from "./providers/elevenlabs";
 import { openai } from "./providers/openai";
 import { withRetry } from "./retry";
+
+/** OpenAI-wire endpoint keys that have no meaning on ElevenLabs. */
+const ELEVENLABS_FOREIGN_KEYS = ["transcribeModel", "speakModel", "embedModel", "tokenParam", "strict", "extraBody"] as const;
 
 /** Settings that ride on the model alias itself rather than the provider instance — see `resolve()`. */
 export interface CallSettings {
@@ -48,20 +52,34 @@ export function retrying(provider: Provider, cfg?: RetryConfig): Provider {
 export function createRegistry(config: AIConfig) {
   const cache = new Map<string, Provider>();
 
-  function fromEndpoint(providerName: string, spec: ProviderEndpoint, model: string): Provider {
+  function fromEndpoint(providerName: string, endpoint: ProviderEndpoint | ElevenLabsEndpoint, model: string): Provider {
     // The provider NAME is free (`orgops`, `local`, …); `api` says which wire protocol to speak. It
-    // defaults to the built-in of the same name so `anthropic`/`openai` still work from a bare key.
-    const api = spec.api ?? (providerName === "anthropic" || providerName === "openai" ? providerName : undefined);
+    // defaults to the built-in of the same name so `anthropic`/`openai`/`elevenlabs` still work from a bare key.
+    const api =
+      endpoint.api ??
+      (providerName === "anthropic" || providerName === "openai" || providerName === "elevenlabs" ? providerName : undefined);
     if (!api) {
       throw new Error(
-        `coax: provider "${providerName}" needs \`api: "openai" | "anthropic"\` (for a compatible endpoint) or a factory ` +
-          `— only "anthropic" and "openai" are inferred from the name`,
+        `coax: provider "${providerName}" needs \`api: "openai" | "anthropic"\` (for a compatible endpoint), \`api: "elevenlabs"\`, ` +
+          `or a factory — only "anthropic", "openai" and "elevenlabs" are inferred from the name`,
       );
     }
+    if (api === "elevenlabs") {
+      // These keys mean something on the OpenAI wire and nothing here. Dropping them silently would let a
+      // config that names a model in `speakModel` run on another one, so each is a config error.
+      for (const key of ELEVENLABS_FOREIGN_KEYS) {
+        if ((endpoint as ProviderEndpoint)[key] !== undefined) {
+          const hint = key === "transcribeModel" || key === "speakModel" ? ` — name the model in the reference, e.g. "${providerName}:scribe_v2"` : "";
+          throw new Error(`coax: provider "${providerName}" (api "elevenlabs") does not take \`${key}\`${hint}`);
+        }
+      }
+      return elevenlabs({ model, apiKey: endpoint.apiKey, baseURL: endpoint.baseURL, headers: endpoint.headers, voice: endpoint.voice });
+    }
+    const spec = endpoint as ProviderEndpoint;
     const common = { model, apiKey: spec.apiKey, baseURL: spec.baseURL, headers: spec.headers, extraBody: spec.extraBody };
     return api === "anthropic"
       ? anthropic(common)
-      : openai({ ...common, transcribeModel: spec.transcribeModel, speakModel: spec.speakModel, embedModel: spec.embedModel, tokenParam: spec.tokenParam, strict: spec.strict });
+      : openai({ ...common, transcribeModel: spec.transcribeModel, speakModel: spec.speakModel, embedModel: spec.embedModel, tokenParam: spec.tokenParam, strict: spec.strict, voice: spec.voice });
   }
 
   function providerFor(providerName: string, model: string): Provider {

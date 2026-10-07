@@ -1,0 +1,66 @@
+{
+  "source": "MEASURED: real @elevenlabs/elevenlabs-js 2.71.0 + stubbed fetch, .ziv/logs/stage-02/survey/probe-wire.mjs -> probe-wire.out (2026-10-07). Field list and meanings: SDK api/resources/speechToText/client/requests/BodySpeechToTextV1SpeechToTextPost.d.ts and https://elevenlabs.io/docs/api-reference/speech-to-text/convert + https://api.elevenlabs.io/openapi.json (schema Body_Speech_to_Text_v1_speech_to_text_post), accessed 2026-10-07.",
+  "kind": "sdk-params + measured multipart wire",
+  "fixture": {
+    "sdkCall": {
+      "method": "client.speechToText.convert(request, requestOptions)",
+      "request": {
+        "modelId": "scribe_v2",
+        "file": { "data": "<Uint8Array | ArrayBuffer | Blob | File | Buffer | Readable | ReadableStream>", "filename": "audio.webm", "contentType": "audio/webm" },
+        "languageCode": "de",
+        "diarize": true,
+        "timestampsGranularity": "word",
+        "keyterms": ["coax", "Zod"]
+      },
+      "requestOptions": { "abortSignal": "<AbortSignal>", "headers": { "x-per-call": "1" }, "maxRetries": 0, "additionalBodyParameters": { "extra_flag": "x" } }
+    },
+    "wire": {
+      "url": "https://api.elevenlabs.io/v1/speech-to-text",
+      "method": "POST",
+      "headers": { "xi-api-key": "test-key", "content-type": "multipart/form-data; boundary=<set by fetch>" },
+      "form": [
+        ["model_id", "scribe_v2"],
+        ["file", { "blob": true, "name": "audio.webm", "type": "audio/webm", "size": 4 }],
+        ["language_code", "de"],
+        ["timestamps_granularity", "word"],
+        ["diarize", "true"],
+        ["keyterms", "coax"],
+        ["keyterms", "Zod"]
+      ]
+    },
+    "fileWithoutMetadata": {
+      "BlobWithType": ["file", { "blob": true, "name": "blob", "type": "audio/wav", "size": 2 }],
+      "ArrayBuffer": ["file", { "blob": true, "name": "blob", "type": "", "size": 2 }]
+    },
+    "allFormFields": {
+      "model_id": "string, REQUIRED. Documented ids: scribe_v2, scribe_v2_medical (scribe_v1 deprecated). No enum in the OpenAPI schema.",
+      "file": "binary; exactly one of file / source_url / cloud_storage_url. >= 100 ms audio; < 5.0 GB (API ref) vs 3 GB (capabilities page) - docs disagree. All major audio AND video formats.",
+      "source_url": "string (hosted audio/video, YouTube, TikTok ...). cloud_storage_url: deprecated alias.",
+      "language_code": "ISO-639-1 or ISO-639-3; null = auto-detect",
+      "tag_audio_events": "boolean, DEFAULT TRUE - (laughter), (footsteps) appear in text and as type 'audio_event' words",
+      "num_speakers": "integer 1-32 or null",
+      "timestamps_granularity": "none | word | character, DEFAULT word",
+      "diarize": "boolean, default false",
+      "diarization_threshold": "0.1-0.4, only with diarize=true and num_speakers=null",
+      "additional_formats": "list of {format: segmented_json|docx|pdf|txt|html|srt, ...options}",
+      "file_format": "pcm_s16le_16 | other (default other)",
+      "webhook / webhook_id / webhook_metadata": "async mode: returns early, result goes to a dashboard-configured webhook",
+      "temperature": "0.0-2.0",
+      "seed": "0-2147483647",
+      "use_multi_channel / multichannel_output_style": "up to 5 channels, each billed at full duration; separate | combined",
+      "entity_detection / entity_redaction / entity_redaction_mode": "pii/phi/pci/other/offensive_language ...",
+      "transcript_edit": "natural-language post-edit instruction (<= 2000 chars), +30%, min 10 s billed",
+      "no_verbatim": "drop filler words (scribe_v2 only)",
+      "use_speaker_library / detect_speaker_roles": "speaker matching / agent-vs-customer labels (+10%)",
+      "keyterms": "list of terms to bias towards: <= 1000 terms (help center says 100), each < 50 chars and <= 5 words, no < > { } [ ] \\ ; +20%; > 100 terms -> 20 s minimum billed",
+      "query: enable_logging": "false = zero retention (enterprise only)",
+      "query: token": "single-use token (POST /v1/single-use-token/batch_scribe) instead of the key - for browsers"
+    }
+  },
+  "expect": {
+    "noFreeTextPrompt": "There is no free-text context prompt. coax's TranscribeRequest.prompt has no equivalent: keyterms is a LIST of terms with a surcharge, transcript_edit is a post-processing instruction. Mapping prompt onto either changes meaning and cost.",
+    "filenameMatters": "Without filename/contentType the SDK names the part 'blob' and an ArrayBuffer/Uint8Array goes out with an empty type. Pass { data, filename, contentType } from coax's AudioInput (mediaType/filename), like the openai provider's toFile does.",
+    "extraBodyNotPossibleThroughSdk": "requestOptions.additionalBodyParameters is NOT appended to the multipart form (measured: extra_flag absent). A per-call extraBody for transcribe would need its own code path (append to the SDK request is impossible; a fetch wrapper or no-SDK call would be needed).",
+    "sdkDropsStringEntityDetection": "SDK only appends entity_detection / entity_redaction when they are ARRAYS (Client.js: `if (Array.isArray(...))`); a plain string such as 'all' is silently dropped. Irrelevant unless coax exposes them."
+  }
+}

@@ -17,6 +17,7 @@ import {
   type ToolsResponse,
   type TranscribeRequest,
   type TranscribeResponse,
+  type TranscriptWord,
   type Usage,
 } from "./types";
 
@@ -121,6 +122,8 @@ export interface TextResult {
 
 export interface TranscribeResult {
   text: string;
+  /** Word timings where the vendor returns them (ElevenLabs); absent otherwise. */
+  words?: TranscriptWord[];
   usage: Usage;
   model: string;
 }
@@ -434,7 +437,8 @@ export function createClient(opts: ClientOptions): Client {
     async transcribe(req: TranscribeRequest): Promise<TranscribeResult> {
       const res: TranscribeResponse = await aborting(req.signal, emptyUsage, () => capability("transcribe", "transcription")(req));
       await onUsage?.(res.usage, res.model);
-      return { text: res.text, usage: res.usage, model: res.model };
+      // `words` only when the vendor returned them, so a result without them keeps exactly today's keys.
+      return { text: res.text, ...(res.words ? { words: res.words } : {}), usage: res.usage, model: res.model };
     },
 
     async speak(req: SpeakRequest): Promise<SpeakResult> {

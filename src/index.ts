@@ -3,7 +3,7 @@ export { configure, ai, isConfigured, reset } from "./runtime";
 // Explicit instance (recommended for libraries, tests, multiple configs).
 export { createAI } from "./ai";
 export type { AI, ObjectCall, TextCall, TextStream, ObjectStream, RunStream, DeepPartial, JudgeCall, Judgement, RunCall, EmbedCall, TranscribeCall, SpeakCall } from "./ai";
-export type { AIConfig, ProviderConfig, ProviderEndpoint, ModelConfig, RetryConfig, CallDefaults, CallMeta } from "./config";
+export type { AIConfig, ProviderConfig, ProviderEndpoint, ElevenLabsEndpoint, ModelConfig, RetryConfig, CallDefaults, CallMeta } from "./config";
 export { parsePrompt, renderTemplate } from "./prompt-file";
 export type { ParsedPrompt, PromptMeta } from "./prompt-file";
 
@@ -27,6 +27,9 @@ export { anthropic } from "./providers/anthropic";
 export type { AnthropicOptions } from "./providers/anthropic";
 export { openai } from "./providers/openai";
 export type { OpenAiOptions } from "./providers/openai";
+// Voice only: speech synthesis and transcription.
+export { elevenlabs } from "./providers/elevenlabs";
+export type { ElevenLabsOptions } from "./providers/elevenlabs";
 
 // Building blocks / types.
 export { extractJson } from "./parse";
@@ -54,5 +57,6 @@ export type {
   ToolsResponse,
   TranscribeRequest,
   TranscribeResponse,
+  TranscriptWord,
   Usage,
 } from "./types";

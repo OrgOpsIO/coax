@@ -12,7 +12,7 @@ for you. The same configuration also gives you **tools**, **voice** (speech-to-t
 npm install @orgops/coax zod
 ```
 
-The Anthropic and OpenAI SDKs ship *inside* coax — nothing else to install.
+The Anthropic, OpenAI and ElevenLabs SDKs ship *inside* coax — nothing else to install.
 
 ## Configure once, use `ai` everywhere
 
@@ -131,6 +131,17 @@ configure({
     local: "orgops:chat/Qwen/Qwen3-VL-32B-Instruct-AWQ",         // slashes and colons in the id are fine
   },
 });
+```
+
+`elevenlabs` is built in from a bare key too, and serves voice only (see [Voice](#voice)). A second
+ElevenLabs account — e.g. one with data residency, which has its own key and host — is a second name with
+`api: "elevenlabs"`, its own `apiKey` and a `baseURL` (the host root, no `/v1`):
+
+```ts
+providers: {
+  elevenlabs: process.env.ELEVENLABS_API_KEY!,
+  "labs-eu": { api: "elevenlabs", apiKey: process.env.ELEVENLABS_EU_API_KEY!, baseURL: "https://api.eu.residency.elevenlabs.io" },
+}
 ```
 
 Two OpenAI-wire details are handled for you, overridable per endpoint: the output-token cap goes out as
@@ -278,9 +289,11 @@ try {
   an `output` schema the run ends through a validated answer tool: typed data on `result.data`.
 - **Agent loops** — `ai.loop()` drives a typed multi-turn loop with a built-in doom guard + token budget.
 - **Token budget** — `createBudget(limit)` caps the total spend of a loop, a run, or a fan-out.
-- **Usage** — one `onUsage(usage, meta)` hook across every call, plus summed `usage` on each result.
+- **Usage** — one `onUsage(usage, meta)` hook across every call, plus summed `usage` on each result, in
+  each vendor's billing unit (tokens, characters, audio seconds).
 - **Vision** — image/pdf media are first-class.
-- **Voice** — `ai.transcribe()` / `ai.speak()` where the endpoint serves them, with a precise error where it doesn't.
+- **Voice** — `ai.transcribe()` / `ai.speak()` on ElevenLabs and on any OpenAI-wire endpoint that serves
+  them, with a precise error where it doesn't.
 - **Reasoning effort** — `reasoningEffort: "none" | "low" | "medium" | "high"` per call, per model alias,
   or as a default; mapped to each provider's native wire field, sent only where set.
 - **`extraBody`** — a generic, un-whitelisted escape hatch into the wire body, per endpoint and per call,
@@ -365,17 +378,55 @@ reason to stop.
 
 ### Voice
 
-`ai.transcribe()` and `ai.speak()` reach an endpoint's `/audio/transcriptions` and `/audio/speech`. Chain
-them with `run()` and you have a voice assistant that never leaves your own server:
+`ai.transcribe()` and `ai.speak()` run on ElevenLabs (built in, voice only) and on any OpenAI-wire
+endpoint's `/audio/transcriptions` and `/audio/speech`. As everywhere, the model reference names the
+vendor and its model for that capability:
 
 ```ts
-const { text } = await ai.transcribe({ model: "local", audio: { data: await file.arrayBuffer(), mediaType: "audio/webm" }, language: "de" });
-const answer = await ai.run({ model: "local", prompt: text, tools, context });
-const { audio, mediaType } = await ai.speak({ model: "local", input: answer.text, voice: "de-female" });
+configure({
+  providers: {
+    elevenlabs: { apiKey: process.env.ELEVENLABS_API_KEY!, voice: process.env.ELEVENLABS_VOICE_ID! }, // or just the key
+    openai: { apiKey: process.env.OPENAI_API_KEY!, voice: "alloy" },
+    anthropic: process.env.ANTHROPIC_API_KEY!,
+  },
+  models: {
+    ears: "elevenlabs:scribe_v2",
+    mouth: { use: "elevenlabs:eleven_flash_v2_5", fallback: "openai:gpt-4o-mini-tts" },
+    smart: "anthropic:claude-opus-4-8",
+  },
+});
+
+const { text } = await ai.transcribe({ model: "ears", audio: { data: await file.arrayBuffer(), mediaType: "audio/webm" }, language: "de" });
+const answer = await ai.run({ model: "smart", prompt: text, tools, context });
+const { audio, mediaType } = await ai.speak({ model: "mouth", input: answer.text, language: "de" });
 ```
 
+Point the same three calls at your own `local` gateway and you have a voice assistant that never leaves
+your own server.
+
+**Voices** are the vendor's ids — ElevenLabs ids from its voice library or API, OpenAI's names (`alloy`,
+`nova`). Set a default `voice` on the endpoint, as above: the `ai.speak()` line then stays the same on
+every vendor, and a cross-vendor fallback speaks with each vendor's own voice. A per-call `voice` wins.
+ElevenLabs has no default voice of its own — without one, coax fails before the call. coax does not look
+voices up by name.
+
+**Fields.** `language` on `speak` is a hint: ElevenLabs takes it, the OpenAI speech endpoint has no such
+field and reads the language from the text. On ElevenLabs a transcript carries `words` (`{ text, start,
+end, speaker? }`, in order); `speakers: true` labels who spoke each one (an error on the OpenAI wire).
+ElevenLabs serves `format` `mp3` (the default, 44.1 kHz / 128 kbps), `opus` (48 kHz / 128 kbps), `wav` and
+`pcm` (24 kHz), and `speed` 0.7–1.2. `aac`/`flac`, `instructions` and a transcription `prompt` raise
+`CoaxUnsupportedError` there rather than being dropped — the v3/v4 models take audio tags such as
+`[whispers]` in the text instead. A `speed` outside the range fails before the call.
+
+**Usage** comes in the vendor's billing unit, through the same `onUsage`: `usage.characters` for
+ElevenLabs speech, `usage.audioSeconds` for transcription (ElevenLabs, OpenAI whisper). Each is present
+only when the vendor reported it — never estimated. The token counts stay 0 there, and a `Budget` counts
+tokens only.
+
 `audio.data` takes a `Uint8Array`, `ArrayBuffer`, or a browser `Blob`/`File`. A provider without these
-routes throws `CoaxUnsupportedError` naming the missing capability — not a mystery 404.
+routes throws `CoaxUnsupportedError` naming the missing capability — not a mystery 404. The same goes the
+other way: `ai.text()`, `ai.object()`, `ai.run()` or `ai.embed()` on an `elevenlabs:` model names the
+capability ElevenLabs does not serve.
 
 ### Agent loops
 
@@ -549,7 +600,8 @@ still sees who is asking.
 
 Small and unopinionated. The only vendor-specific surface is the `Provider` interface: `structured` and
 `text` are required, `tools` / `transcribe` / `speak` are optional capabilities an endpoint either serves
-or honestly doesn't. Everything else — schema handling, aggressive parsing, the repair/retry/fallback
+or honestly doesn't. A voice-only vendor (ElevenLabs) implements `structured` and `text` by raising
+`CoaxUnsupportedError` — the same error as for any missing capability. Everything else — schema handling, aggressive parsing, the repair/retry/fallback
 loop, the tool driver, prompt files — is pure and unit-tested against fakes, no network. Zod is a peer
 dependency (you write the schemas); the provider SDKs ship inside coax and load lazily. The high-level
 `createAI` is the recommended entry point; `createClient` (single provider, no config) is available for

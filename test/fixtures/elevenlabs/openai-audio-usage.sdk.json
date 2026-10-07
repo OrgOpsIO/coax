@@ -1,0 +1,13 @@
+{
+  "source": "openai SDK 6.46.0 as installed in coax's node_modules (package.json pins ^6.7.0): resources/audio/transcriptions.d.ts (Transcription.usage?: Tokens | Duration), resources/audio/speech.d.ts (SpeechModel, response_format, speed 0.25-4.0). coax side: src/providers/openai.ts mapUsage() and speak() (emptyUsage). Bodies COMPOSED from those types. Read 2026-10-07.",
+  "kind": "sdk-responses (the OTHER vendor of the README Voice section)",
+  "fixture": {
+    "transcription_tokens": { "text": "Hello.", "usage": { "type": "tokens", "input_tokens": 52, "output_tokens": 3, "total_tokens": 55, "input_token_details": { "audio_tokens": 50, "text_tokens": 2 } } },
+    "transcription_duration": { "text": "Hello.", "usage": { "type": "duration", "seconds": 4 } },
+    "speech": "binary audio; no usage in the response (billing: tts-1/tts-1-hd per character, gpt-4o-mini-tts per token - pricing NOT looked up this stage)"
+  },
+  "expect": {
+    "today": "coax maps transcription usage through mapUsage(): the 'tokens' variant gives inputTokens 52 / outputTokens 3; the 'duration' variant (whisper-1) maps to all zeros - the billed seconds are dropped. speak() reports emptyUsage() always.",
+    "relevance": "A Usage field for audio seconds would have TWO users today (ElevenLabs Scribe audio_duration_secs, OpenAI whisper usage.seconds); a character field has one measured user (ElevenLabs character-cost) plus OpenAI tts-1 if coax counted input characters itself (not reported by the API)."
+  }
+}
