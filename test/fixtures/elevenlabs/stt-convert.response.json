@@ -1,0 +1,63 @@
+{
+  "source": "REST bodies: (a) VERBATIM Example_0 of https://elevenlabs.io/docs/api-reference/speech-to-text/convert ; (b) VERBATIM start of the Scribe v2 example on https://elevenlabs.io/docs/overview/capabilities/speech-to-text (truncated after three words by the surveyor, the page repeats the pattern); (c) excerpt VERBATIM from https://elevenlabs.io/docs/eleven-api/guides/how-to/speech-to-text/batch/entity-detection (entities removed); (d) COMPOSED with every optional field of SpeechToTextChunkResponseModel (SDK api/types/SpeechToTextChunkResponseModel.d.ts, @elevenlabs/elevenlabs-js 2.71.0; OpenAPI https://api.elevenlabs.io/openapi.json). SDK form: MEASURED, the SDK camelCases the keys (probe-wire.out). All accessed 2026-10-07.",
+  "kind": "rest-response + sdk-parsed",
+  "fixture": {
+    "a_minimal_rest_verbatim": {
+      "language_code": "en",
+      "language_probability": 0.98,
+      "text": "Hello world!",
+      "words": [
+        { "end": 0.5, "logprob": -0.124, "speaker_id": "speaker_1", "start": 0, "text": "Hello", "type": "word" }
+      ]
+    },
+    "b_spacing_and_speakers_rest_verbatim_truncated": {
+      "language_code": "en",
+      "language_probability": 1,
+      "text": "With a soft and whispery American accent, I'm the ideal choice for creating ASMR content, meditative guides, or adding an intimate feel to your narrative projects.",
+      "words": [
+        { "text": "With", "start": 0.119, "end": 0.259, "type": "word", "speaker_id": "speaker_0" },
+        { "text": " ", "start": 0.239, "end": 0.299, "type": "spacing", "speaker_id": "speaker_0" },
+        { "text": "a", "start": 0.299, "end": 0.339, "type": "word", "speaker_id": "speaker_0" }
+      ]
+    },
+    "c_iso639_3_language_rest_verbatim_excerpt": {
+      "language_code": "eng",
+      "language_probability": 0.9869821071624756,
+      "text": "My name is Jill.",
+      "words": [{ "text": "My", "start": 0.099, "end": 0.259, "type": "word", "logprob": 0.0 }],
+      "transcription_id": "Y2ZX8AxHUzTPCIualYiE"
+    },
+    "d_full_rest_composed": {
+      "language_code": "deu",
+      "language_probability": 0.97,
+      "text": "Guten Tag. (laughter) Ich habe eine Frage.",
+      "words": [
+        { "text": "Guten", "start": 0.12, "end": 0.41, "type": "word", "speaker_id": "speaker_0", "logprob": -0.05 },
+        { "text": " ", "start": 0.41, "end": 0.45, "type": "spacing", "speaker_id": "speaker_0", "logprob": 0 },
+        { "text": "Tag.", "start": 0.45, "end": 0.8, "type": "word", "speaker_id": "speaker_0", "logprob": -0.02 },
+        { "text": " ", "start": 0.8, "end": 0.9, "type": "spacing", "speaker_id": "speaker_0", "logprob": 0 },
+        { "text": "(laughter)", "start": 0.9, "end": 1.6, "type": "audio_event", "speaker_id": "speaker_1", "logprob": -0.4 },
+        { "text": " ", "start": 1.6, "end": 1.7, "type": "spacing", "speaker_id": "speaker_1", "logprob": 0 },
+        { "text": "Ich", "start": 1.7, "end": 1.9, "type": "word", "speaker_id": "speaker_1", "logprob": -0.01,
+          "characters": [{ "text": "I", "start": 1.7, "end": 1.77 }, { "text": "c", "start": 1.77, "end": 1.83 }, { "text": "h", "start": 1.83, "end": 1.9 }] }
+      ],
+      "transcription_id": "tr_composed_1",
+      "audio_duration_secs": 3.84
+    },
+    "d_sdk_parsed_measured_shape": {
+      "languageCode": "deu",
+      "languageProbability": 0.97,
+      "text": "Guten Tag. (laughter) Ich habe eine Frage.",
+      "words": [{ "text": "Guten", "start": 0.12, "end": 0.41, "type": "word", "speakerId": "speaker_0", "logprob": -0.05 }],
+      "transcriptionId": "tr_composed_1",
+      "audioDurationSecs": 3.84
+    }
+  },
+  "expect": {
+    "text": "TranscribeResponse.text = body.text (the SDK passes unknown keys through, enums are not enforced)",
+    "usage": "The ONLY usage datum is audio_duration_secs (seconds, float) in the body - OPTIONAL in the schema and ABSENT from all three doc examples. No usage response header is documented for STT. When it is absent, coax has nothing measured to report (the client could measure the input duration itself only by decoding audio - not coax's business).",
+    "language": "language_code comes back as ISO-639-3 ('eng', 'deu') per the field description and the entity example, but as 'en' in two doc examples: treat as opaque string.",
+    "words": "words[] mixes type 'word', 'spacing' and 'audio_event'; start/end in seconds (nullable); speaker_id 'speaker_N' (or 'agent'/'customer' with detect_speaker_roles); characters[] only with timestamps_granularity=character; logprob may be missing (doc example b).",
+    "audioEventsInText": "tag_audio_events defaults to TRUE: '(laughter)'-style tags are part of body.text unless the request sends tag_audio_events=false."
+  }
+}

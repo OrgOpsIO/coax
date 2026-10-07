@@ -14,6 +14,9 @@ const valid = [
   { providers: { orgops: { apiKey: "sk", baseURL: "https://x/v1", api: "openai", speakModel: "tts-1" } } },
   { providers: { "google-eu": { api: "google", project: "p", location: "eu" } } },
   { providers: { mine: factory, openai: factory, google: factory } },
+  { providers: { elevenlabs: "xi" } },
+  { providers: { elevenlabs: { apiKey: "xi", voice: "v", baseURL: "https://api.eu.residency.elevenlabs.io" } } },
+  { providers: { "labs-eu": { api: "elevenlabs", apiKey: "xi" } } },
 ] satisfies AIConfig[];
 
 const invalid: AIConfig[] = [
@@ -31,11 +34,17 @@ const invalid: AIConfig[] = [
   { providers: { orgops: { apiKey: "sk", baseURL: "https://x/v1", api: "openai", project: "p" } } },
   // @ts-expect-error a compatible endpoint with a Google key, no api
   { providers: { orgops: { apiKey: "sk", baseURL: "https://x/v1", googleAuthOptions: {} } } },
+  // @ts-expect-error project is Google's
+  { providers: { elevenlabs: { apiKey: "xi", project: "p" } } },
+  // @ts-expect-error speakModel is the OpenAI wire's; ElevenLabs names the model in the reference
+  { providers: { elevenlabs: { apiKey: "xi", speakModel: "eleven_v3" } } },
+  // @ts-expect-error voice is not a Google option
+  { providers: { google: { project: "p", voice: "v" } } },
 ];
 
 describe("providers map types", () => {
   it("the valid forms are kept and the invalid ones are compile errors (checked by typecheck)", () => {
-    expect(valid).toHaveLength(8);
-    expect(invalid).toHaveLength(7);
+    expect(valid).toHaveLength(11);
+    expect(invalid).toHaveLength(10);
   });
 });

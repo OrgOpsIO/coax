@@ -91,10 +91,12 @@ export interface TranscribeCall {
   model?: string;
   /** The audio bytes. A browser upload's Blob/File works directly. */
   audio: AudioInput;
-  /** ISO-639-1 hint, e.g. "de". */
+  /** Language hint, ISO-639-1, e.g. "de" (ElevenLabs also takes ISO-639-3). See `TranscribeRequest.language`. */
   language?: string;
-  /** Context hint — domain vocabulary, names, expected spelling. */
+  /** Context hint — domain vocabulary, names, expected spelling. Not on ElevenLabs (an error there). */
   prompt?: string;
+  /** Label who spoke each word (`words[].speaker`). ElevenLabs; an error on the OpenAI wire. */
+  speakers?: boolean;
   headers?: Record<string, string>;
   signal?: AbortSignal;
   purpose?: string;
@@ -107,6 +109,8 @@ export interface SpeakCall {
   format?: AudioFormat;
   speed?: number;
   instructions?: string;
+  /** Language hint, ISO-639-1. See `SpeakRequest.language`. */
+  language?: string;
   headers?: Record<string, string>;
   signal?: AbortSignal;
   purpose?: string;
@@ -492,7 +496,14 @@ export function createAI(config: AIConfig): AI {
 
     transcribe(call: TranscribeCall): Promise<TranscribeResult> {
       return withFallback(call.model, call.model, call.purpose ?? "transcribe", (client) =>
-        client.transcribe({ audio: call.audio, language: call.language, prompt: call.prompt, headers: call.headers, signal: call.signal }),
+        client.transcribe({
+          audio: call.audio,
+          language: call.language,
+          prompt: call.prompt,
+          ...(call.speakers != null ? { speakers: call.speakers } : {}),
+          headers: call.headers,
+          signal: call.signal,
+        }),
       );
     },
 
@@ -504,6 +515,7 @@ export function createAI(config: AIConfig): AI {
           format: call.format,
           speed: call.speed,
           instructions: call.instructions,
+          ...(call.language != null ? { language: call.language } : {}),
           headers: call.headers,
           signal: call.signal,
         }),

@@ -1,0 +1,27 @@
+{
+  "source": "Headers character-cost / request-id / x-trace-id: VERBATIM names from https://elevenlabs.io/docs/api-reference/introduction (code sample: rawResponse.headers.get('character-cost')); current-concurrent-requests / maximum-concurrent-requests: https://elevenlabs.io/docs/overview/models; x-region: https://elevenlabs.io/docs/eleven-api/guides/how-to/best-practices/latency-optimization. All accessed 2026-10-07. Body handling MEASURED with the real SDK 2.71.0 (probe-wire.out): convert() resolves to a web ReadableStream<Uint8Array>; withRawResponse() exposes the headers. Header VALUES and the Content-Type value are COMPOSED (not documented).",
+  "kind": "rest-response (binary) + sdk-parsed",
+  "fixture": {
+    "status": 200,
+    "headers": {
+      "content-type": "audio/mpeg  <- GUESS, the docs do not state the value",
+      "character-cost": "12",
+      "request-id": "<opaque id>",
+      "x-trace-id": "<opaque id>",
+      "current-concurrent-requests": "1",
+      "maximum-concurrent-requests": "5",
+      "x-region": "<USA | Netherlands | Singapore>"
+    },
+    "bodyBytesHex": "4944330400000000",
+    "sdkResult": {
+      "data": "ReadableStream<Uint8Array>  (read with new Response(data).arrayBuffer())",
+      "rawResponse": "{ headers: Headers, status: 200, statusText, url, redirected, type }"
+    }
+  },
+  "expect": {
+    "audio": "SpeakResponse.audio = the whole body as Uint8Array",
+    "mediaType": "Derived from the requested output_format (as the openai provider does), not from the Content-Type header, whose value is undocumented.",
+    "usage": "Billing unit is characters. The billed count is the 'character-cost' response header (a decimal string). It can differ from input.length (per-model/per-voice multipliers, see GET /v1/models model_rates.character_cost_multiplier) - GUESS how exactly; whether whitespace/tags count is not documented. If the header is missing, coax has no measured value (input.length would be a guess, not the bill).",
+    "notReachable": "With plain await (no withRawResponse) the headers are lost - the provider must use withRawResponse() to report usage."
+  }
+}

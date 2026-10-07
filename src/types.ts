@@ -72,6 +72,12 @@ export interface Usage {
   cacheReadTokens: number;
   /** Tokens written to the prompt cache (0 if unsupported). */
   cacheWriteTokens: number;
+  /** Characters billed for speech synthesis (ElevenLabs: the `character-cost` response header). Absent
+   *  when the vendor reported none. Not counted by a `Budget`, which counts tokens. */
+  characters?: number;
+  /** Seconds of audio billed for transcription (ElevenLabs `audio_duration_secs`, OpenAI whisper
+   *  `usage.seconds`). Absent when the vendor reported none. Not counted by a `Budget`. */
+  audioSeconds?: number;
 }
 
 /** Fields every generation call accepts. */
@@ -179,10 +185,12 @@ export interface EmbedResponse {
 
 export interface TranscribeRequest {
   audio: AudioInput;
-  /** ISO-639-1 hint, e.g. "de". Improves accuracy and latency when the language is known. */
+  /** Language hint, ISO-639-1 (e.g. "de"; ElevenLabs also takes ISO-639-3). Improves accuracy and latency when the language is known. */
   language?: string;
-  /** Context hint — domain vocabulary, names, expected spelling. */
+  /** Context hint — domain vocabulary, names, expected spelling. Not on ElevenLabs (CoaxUnsupportedError). */
   prompt?: string;
+  /** Label who spoke each word (`words[].speaker`). ElevenLabs; CoaxUnsupportedError on the OpenAI wire. */
+  speakers?: boolean;
   headers?: Record<string, string>;
   signal?: AbortSignal;
 }
@@ -192,10 +200,14 @@ export interface SpeakRequest {
   /** Voice id, as named by the endpoint's TTS service. */
   voice?: string;
   format?: AudioFormat;
-  /** 0.25–4.0, 1.0 = normal. */
+  /** 1.0 = normal. OpenAI wire 0.25–4.0; ElevenLabs 0.7–1.2 (outside → error before the call). */
   speed?: number;
-  /** Free-form delivery instruction where the service supports it (tone, pace, emotion). */
+  /** Free-form delivery instruction (tone, pace, emotion). Not on ElevenLabs (CoaxUnsupportedError). */
   instructions?: string;
+  /** Language hint, ISO-639-1 (e.g. "de"). Sent where the service takes one (ElevenLabs — whose models
+   *  ignore a language they don't support; `eleven_multilingual_v2` takes none); the OpenAI speech endpoint
+   *  has no such field and reads the language from `input`. */
+  language?: string;
   headers?: Record<string, string>;
   signal?: AbortSignal;
 }
@@ -221,8 +233,20 @@ export interface ToolsResponse {
   providerData?: unknown;
 }
 
+/** One spoken word with its timing, in order. */
+export interface TranscriptWord {
+  text: string;
+  /** Seconds from the start of the audio. */
+  start: number;
+  end: number;
+  /** Speaker label (e.g. "speaker_0") where the vendor labelled one — ask for it with `speakers: true`. */
+  speaker?: string;
+}
+
 export interface TranscribeResponse {
   text: string;
+  /** Word timings where the vendor returns them (ElevenLabs); absent otherwise. */
+  words?: TranscriptWord[];
   usage: Usage;
   model: string;
 }
@@ -240,6 +264,8 @@ export interface SpeakResponse {
  * Anthropic tool_use, OpenAI json_schema) and `text` are required. The rest are optional capabilities:
  * an endpoint that serves them implements them, and coax raises a precise error where it does not —
  * so "my gateway has no TTS" is a clear message, not a mystery 404. Swap providers = swap this object.
+ * A vendor that serves neither (a voice-only one) implements both by rejecting with `CoaxUnsupportedError`,
+ * the same error coax raises for a missing optional capability.
  */
 export interface Provider {
   readonly name: string;
@@ -326,9 +352,13 @@ export function withBilledUsage<E extends object>(err: E, usage: Usage): E {
 
 export const emptyUsage = (): Usage => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
 
+/** Sums two usages. A billing unit beyond tokens (`characters`, `audioSeconds`) is summed when either side
+ *  has it and left out when neither does — so token-only sums keep exactly the four token fields. */
 export const addUsage = (a: Usage, b: Usage): Usage => ({
   inputTokens: a.inputTokens + b.inputTokens,
   outputTokens: a.outputTokens + b.outputTokens,
   cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
   cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
+  ...(a.characters != null || b.characters != null ? { characters: (a.characters ?? 0) + (b.characters ?? 0) } : {}),
+  ...(a.audioSeconds != null || b.audioSeconds != null ? { audioSeconds: (a.audioSeconds ?? 0) + (b.audioSeconds ?? 0) } : {}),
 });

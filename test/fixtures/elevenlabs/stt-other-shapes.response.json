@@ -1,0 +1,22 @@
+{
+  "source": "multichannel: VERBATIM OpenAPI example (https://api.elevenlabs.io/openapi.json, MultichannelSpeechToTextResponseModel); webhook/202: VERBATIM OpenAPI 202 example + SpeechToTextWebhookResponseModel (SDK api/types/SpeechToTextWebhookResponseModel.d.ts, 2.71.0); webhook POST payload shape per https://elevenlabs.io/docs/eleven-api/guides/how-to/speech-to-text/batch/webhooks; silence: COMPOSED GUESS (no doc states what silent audio returns). Accessed 2026-10-07.",
+  "kind": "rest-responses (reference: shapes coax must not mistake for a transcript)",
+  "fixture": {
+    "multichannel_separate": {
+      "transcripts": [
+        { "language_code": "en", "language_probability": 0.98, "text": "Hello from channel one.",
+          "words": [{ "text": "Hello", "start": 0.0, "end": 0.5, "type": "word", "speaker_id": "speaker_0", "channel_index": 0, "logprob": -0.124 }] },
+        { "language_code": "en", "language_probability": 0.97, "text": "Greetings from channel two.",
+          "words": [{ "text": "Greetings", "start": 0.1, "end": 0.7, "type": "word", "speaker_id": "speaker_1", "channel_index": 1, "logprob": -0.156 }] }
+      ]
+    },
+    "webhook_accepted_202": { "message": "Request accepted. Transcription result will be sent to the webhook.", "request_id": "abc123" },
+    "webhook_post_payload": { "type": "speech_to_text_transcription", "data": { "request_id": "abc123", "webhook_metadata": {}, "transcription": "<SpeechToTextChunkResponseModel>" } },
+    "silence_GUESS": { "language_code": "en", "language_probability": 0.0, "text": "", "words": [] }
+  },
+  "expect": {
+    "multichannel": "Only returned when use_multi_channel=true AND multichannel_output_style='separate' (default). coax never sends use_multi_channel, so it never sees this shape unless a caller forces it - then body.text is undefined. 'combined' returns the flat single-channel shape with channel_index per word.",
+    "webhook": "Only when webhook=true; carries no text. coax never sends webhook. The SDK's convert() typings return this union member only for webhook:true.",
+    "silence": "Empty text is a legitimate transcript of silence, not a refusal - unverified guess, no doc found."
+  }
+}

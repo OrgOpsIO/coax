@@ -1,9 +1,13 @@
-import type { AIConfig, GoogleEndpoint, ProviderEndpoint, RetryConfig } from "./config";
+import type { AIConfig, ElevenLabsEndpoint, GoogleEndpoint, ProviderEndpoint, RetryConfig } from "./config";
 import { anthropic } from "./providers/anthropic";
+import { elevenlabs } from "./providers/elevenlabs";
 import { google } from "./providers/google";
 import { openai } from "./providers/openai";
 import { withRetry } from "./retry";
 import { addUsage, billedUsage, emptyUsage, withBilledUsage, type Provider, type ReasoningEffort, type Usage } from "./types";
+
+/** OpenAI-wire endpoint keys that have no meaning on ElevenLabs. */
+const ELEVENLABS_FOREIGN_KEYS = ["transcribeModel", "speakModel", "embedModel", "tokenParam", "strict", "extraBody", "project", "location", "googleAuthOptions"] as const;
 
 /** Settings that ride on the model alias itself rather than the provider instance — see `resolve()`. */
 export interface CallSettings {
@@ -74,22 +78,37 @@ export function retrying(provider: Provider, cfg?: RetryConfig): Provider {
 export function createRegistry(config: AIConfig) {
   const cache = new Map<string, Provider>();
 
-  function fromEndpoint(providerName: string, endpoint: ProviderEndpoint | GoogleEndpoint, model: string): Provider {
+  function fromEndpoint(providerName: string, endpoint: ProviderEndpoint | GoogleEndpoint | ElevenLabsEndpoint, model: string): Provider {
     // The provider NAME is free (`orgops`, `local`, …); `api` says which wire protocol to speak. It
-    // defaults to the built-in of the same name so `anthropic`/`openai`/`google` still work from a bare key.
+    // defaults to the built-in of the same name so `anthropic`/`openai`/`google`/`elevenlabs` still work from a bare key.
     const api =
-      endpoint.api ?? (providerName === "anthropic" || providerName === "openai" || providerName === "google" ? providerName : undefined);
+      endpoint.api ??
+      (providerName === "anthropic" || providerName === "openai" || providerName === "google" || providerName === "elevenlabs"
+        ? providerName
+        : undefined);
     if (!api) {
       throw new Error(
-        `coax: provider "${providerName}" needs \`api: "openai" | "anthropic"\` (for a compatible endpoint), \`api: "google"\`, or a factory ` +
-          `— only "anthropic", "openai" and "google" are inferred from the name`,
+        `coax: provider "${providerName}" needs \`api: "openai" | "anthropic"\` (for a compatible endpoint), \`api: "google"\`, ` +
+          `\`api: "elevenlabs"\`, or a factory — only "anthropic", "openai", "google" and "elevenlabs" are inferred from the name`,
       );
+    }
+    if (api === "elevenlabs") {
+      // These keys mean something on the OpenAI wire or on Google and nothing here. Dropping them silently would let a
+      // config that names a model in `speakModel` run on another one, so each is a config error.
+      for (const key of ELEVENLABS_FOREIGN_KEYS) {
+        if ((endpoint as ProviderEndpoint)[key] !== undefined) {
+          const hint = key === "transcribeModel" || key === "speakModel" ? ` — name the model in the reference, e.g. "${providerName}:scribe_v2"` : "";
+          throw new Error(`coax: provider "${providerName}" (api "elevenlabs") does not take \`${key}\`${hint}`);
+        }
+      }
+      const e = endpoint as ElevenLabsEndpoint;
+      return elevenlabs({ model, apiKey: e.apiKey, baseURL: e.baseURL, headers: e.headers, voice: e.voice });
     }
     if (api === "google") {
       // A ProviderEndpoint-shaped config type-checks here too (it is a member of the ProviderConfig union),
       // but google has no use for these keys — dropping a baseURL would send the caller's traffic to
       // Google's public host instead of their proxy, so each is a config error, never ignored.
-      for (const key of ["baseURL", "tokenParam", "strict", "transcribeModel", "speakModel"] as const) {
+      for (const key of ["baseURL", "tokenParam", "strict", "transcribeModel", "speakModel", "voice"] as const) {
         if ((endpoint as ProviderEndpoint)[key] === undefined) continue;
         throw new Error(
           key === "baseURL"
@@ -114,7 +133,7 @@ export function createRegistry(config: AIConfig) {
     const common = { model, apiKey: spec.apiKey, baseURL: spec.baseURL, headers: spec.headers, extraBody: spec.extraBody };
     return api === "anthropic"
       ? anthropic(common)
-      : openai({ ...common, transcribeModel: spec.transcribeModel, speakModel: spec.speakModel, embedModel: spec.embedModel, tokenParam: spec.tokenParam, strict: spec.strict });
+      : openai({ ...common, transcribeModel: spec.transcribeModel, speakModel: spec.speakModel, embedModel: spec.embedModel, tokenParam: spec.tokenParam, strict: spec.strict, voice: spec.voice });
   }
 
   function providerFor(providerName: string, model: string): Provider {

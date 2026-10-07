@@ -31,6 +31,8 @@ export interface ProviderEndpoint {
   /** OpenAI wire only: `strict: true` structured output — the schema shape is grammar-guaranteed by the
    *  endpoint. Opt-in; needs strict-compatible schemas. See `OpenAiOptions.strict`. */
   strict?: boolean;
+  /** Default voice for `ai.speak()` through this endpoint; a per-call `voice` wins. OpenAI wire: else "alloy". */
+  voice?: string;
   /** Google only (see {@link GoogleEndpoint}) — here a type error, as a typo would be. */
   project?: never;
   location?: never;
@@ -67,26 +69,55 @@ export interface GoogleEndpoint {
   speakModel?: never;
   tokenParam?: never;
   strict?: never;
+  voice?: never;
+}
+
+/**
+ * ElevenLabs (voice only: `ai.speak()` and `ai.transcribe()`). Under any name other than `elevenlabs`,
+ * set `api: "elevenlabs"` — e.g. a data-residency account, which has its own key and host.
+ */
+export interface ElevenLabsEndpoint {
+  api?: "elevenlabs";
+  apiKey: string;
+  /** Host root, without `/v1` — e.g. "https://api.us.elevenlabs.io" or a data-residency host. Default: "https://api.elevenlabs.io". */
+  baseURL?: string;
+  /** Headers sent with every call to this endpoint. Per-call `headers` are merged over these. */
+  headers?: Record<string, string>;
+  /** Default voice id for `ai.speak()`; a per-call `voice` wins. ElevenLabs has no default voice of its own. */
+  voice?: string;
+  /** Not on ElevenLabs — name the model in the reference instead (`"elevenlabs:scribe_v2"`); here a type error. */
+  transcribeModel?: never;
+  speakModel?: never;
+  embedModel?: never;
+  tokenParam?: never;
+  strict?: never;
+  extraBody?: never;
+  /** Google only (see {@link GoogleEndpoint}) — here a type error. */
+  project?: never;
+  location?: never;
+  googleAuthOptions?: never;
 }
 
 /**
  * How a provider is configured. Either:
- *  - an API key string (for the built-in `anthropic` / `openai` / `google` providers),
+ *  - an API key string (for the built-in `anthropic` / `openai` / `google` / `elevenlabs` providers),
  *  - a {@link ProviderEndpoint} — the way to reach your own OpenAI-/Anthropic-compatible server,
- *  - a {@link GoogleEndpoint} — Gemini with Application Default Credentials, a region, or a second name, or
+ *  - a {@link GoogleEndpoint} — Gemini with Application Default Credentials, a region, or a second name,
+ *  - an {@link ElevenLabsEndpoint} — ElevenLabs with more than a key (host, default voice, headers), or
  *  - a factory `(model) => Provider` to plug in ANY provider (a local model, a mock in tests).
  */
-export type ProviderConfig = string | ProviderEndpoint | GoogleEndpoint | ((model: string) => Provider);
+export type ProviderConfig = string | ProviderEndpoint | GoogleEndpoint | ElevenLabsEndpoint | ((model: string) => Provider);
 
 /**
  * The `providers` map. The built-in names take only their own form — so an option of another vendor under
- * `openai`, `anthropic` or `google` is a type error rather than silently ignored; any other name takes any
- * {@link ProviderConfig} (with `api` naming its protocol).
+ * `openai`, `anthropic`, `google` or `elevenlabs` is a type error rather than silently ignored; any other
+ * name takes any {@link ProviderConfig} (with `api` naming its protocol).
  */
 export interface ProvidersConfig {
   anthropic?: string | ProviderEndpoint | ((model: string) => Provider);
   openai?: string | ProviderEndpoint | ((model: string) => Provider);
   google?: string | GoogleEndpoint | ((model: string) => Provider);
+  elevenlabs?: string | ElevenLabsEndpoint | ((model: string) => Provider);
   [name: string]: ProviderConfig | undefined;
 }
 
@@ -135,8 +166,8 @@ export interface CallMeta {
 }
 
 export interface AIConfig {
-  /** Provider keys/endpoints/factories. Keys `anthropic`, `openai` and `google` work from a bare API key;
-   *  any other name needs `api` (compatible endpoint, or `"google"`) or a factory. */
+  /** Provider keys/endpoints/factories. Keys `anthropic`, `openai`, `google` and `elevenlabs` work from a
+   *  bare API key; any other name needs `api` (compatible endpoint, `"google"` or `"elevenlabs"`) or a factory. */
   providers: ProvidersConfig;
   /** Named model aliases → "provider:model" (+ optional fallback). */
   models?: Record<string, ModelConfig>;

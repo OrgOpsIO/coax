@@ -1,7 +1,7 @@
 {
   "name": "@orgops/coax",
   "version": "0.11.0",
-  "description": "Typed, provider-agnostic, self-repairing structured output from LLMs — Anthropic, OpenAI and Google Gemini built in. Pure TypeScript — no native modules, no codegen, no vendor lock-in.",
+  "description": "Typed, provider-agnostic, self-repairing structured output from LLMs — Anthropic, OpenAI and Google Gemini built in, plus ElevenLabs voice. Pure TypeScript — no native modules, no codegen, no vendor lock-in.",
   "type": "module",
   "license": "MIT",
   "author": "orgops",
@@ -15,6 +15,9 @@
     "gemini",
     "vertex-ai",
     "gemini-enterprise-agent-platform",
+    "elevenlabs",
+    "text-to-speech",
+    "speech-to-text",
     "json-schema",
     "typescript",
     "provider-agnostic"
@@ -47,7 +50,8 @@
     "jsonrepair": "^3.13.1",
     "@anthropic-ai/sdk": "^0.95.0",
     "@google/genai": "^2.27.0",
-    "openai": "^6.7.0"
+    "openai": "^6.7.0",
+    "@elevenlabs/elevenlabs-js": "^2.71.0"
   },
   "devDependencies": {
     "tsup": "^8.0.0",

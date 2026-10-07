@@ -18,6 +18,8 @@ import {
   type TranscribeResponse,
   type Usage,
 } from "../types";
+import { CoaxUnsupportedError } from "../client";
+import { EXTENSIONS } from "./audio";
 
 export interface OpenAiOptions {
   model: string;
@@ -37,6 +39,8 @@ export interface OpenAiOptions {
    */
   transcribeModel?: string;
   speakModel?: string;
+  /** Default voice for `speak`; a per-call `voice` wins; else `"alloy"`. */
+  voice?: string;
   /** Merged into every request body from this endpoint, under the per-call `extraBody`. See `ProviderEndpoint.extraBody`. */
   extraBody?: Record<string, unknown>;
   /**
@@ -72,11 +76,14 @@ type AnyClient = {
 
 function mapUsage(u: Record<string, unknown> | undefined): Usage {
   const cached = (u?.prompt_tokens_details as { cached_tokens?: number } | undefined)?.cached_tokens ?? 0;
+  // whisper-1 bills transcription by duration: `usage: { type: "duration", seconds }`.
+  const seconds = u?.type === "duration" && typeof u.seconds === "number" && Number.isFinite(u.seconds) ? u.seconds : undefined;
   return {
     inputTokens: (u?.prompt_tokens as number) ?? (u?.input_tokens as number) ?? 0,
     outputTokens: (u?.completion_tokens as number) ?? (u?.output_tokens as number) ?? 0,
     cacheReadTokens: cached,
     cacheWriteTokens: 0,
+    ...(seconds != null ? { audioSeconds: seconds } : {}),
   };
 }
 
@@ -145,20 +152,6 @@ const AUDIO_MEDIA_TYPES: Record<AudioFormat, string> = {
   flac: "audio/flac",
   wav: "audio/wav",
   pcm: "audio/pcm",
-};
-
-/** Whisper-style servers sniff the format from the upload's filename, so derive a sensible one. */
-const EXTENSIONS: Record<string, string> = {
-  "audio/mpeg": "mp3",
-  "audio/mp3": "mp3",
-  "audio/wav": "wav",
-  "audio/x-wav": "wav",
-  "audio/webm": "webm",
-  "audio/ogg": "ogg",
-  "audio/opus": "ogg",
-  "audio/flac": "flac",
-  "audio/mp4": "m4a",
-  "audio/x-m4a": "m4a",
 };
 
 export function openai(opts: OpenAiOptions): Provider {
@@ -383,6 +376,9 @@ export function openai(opts: OpenAiOptions): Provider {
     },
 
     async transcribe(req: TranscribeRequest): Promise<TranscribeResponse> {
+      // Diarization on this wire is a separate model with its own response shape — not built, so asking
+      // for speaker labels is an error rather than a transcript silently without them.
+      if (req.speakers) throw new CoaxUnsupportedError("speaker labels (`speakers`)", "openai");
       const c = await getClient();
       const { toFile } = await import("openai");
       const mediaType = req.audio.mediaType ?? "audio/wav";
@@ -406,8 +402,9 @@ export function openai(opts: OpenAiOptions): Provider {
           model,
           input: req.input,
           // Endpoints differ on whether `voice` is optional; send the OpenAI default only as a fallback
-          // so a service with its own default voice still behaves.
-          voice: req.voice ?? "alloy",
+          // so a service with its own default voice still behaves. `language` is not sent: /audio/speech
+          // has no such field, the model reads the language from `input`.
+          voice: req.voice || opts.voice || "alloy",
           response_format: format,
           ...(req.speed != null ? { speed: req.speed } : {}),
           ...(req.instructions ? { instructions: req.instructions } : {}),

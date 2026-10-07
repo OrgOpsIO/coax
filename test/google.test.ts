@@ -146,7 +146,7 @@ describe("google registry and config (T3)", () => {
   it("the unknown-name error also names the google wire", () => {
     const registry = createRegistry({ providers: { orgops: { apiKey: "sk-test", baseURL: "https://x/v1" } } });
     expect(() => registry.resolve("orgops:m")).toThrow(/api: "google"/);
-    expect(() => registry.resolve("orgops:m")).toThrow(/"anthropic", "openai" and "google" are inferred/);
+    expect(() => registry.resolve("orgops:m")).toThrow(/"anthropic", "openai", "google" and "elevenlabs" are inferred/);
   });
 
   it("apiKey and project together are a config mistake, named on the first call", async () => {
