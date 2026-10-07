@@ -1118,3 +1118,87 @@ describe("measurer: what the earlier proofs left open", () => {
     }
   });
 });
+
+// Measurer (stage 1, run 2 — executed): each test kills a mutation of google.ts that the whole suite
+// survived when it was actually run (decisions/stage-01-measurement.md §6 names them M49 … M76).
+describe("measurer: mutations that survived a real run", () => {
+  it("no systemInstruction key at all when the call has no system prompt (M49)", async () => {
+    const { client, sent } = fake([answer("ok"), answer("ok")]);
+    const p = provider(client);
+    await p.text({ messages: [user("?")] });
+    await p.text({ system: "", messages: [user("?")] });
+    expect(Object.keys(sent[0]!.config)).not.toContain("systemInstruction");
+    expect(Object.keys(sent[1]!.config)).not.toContain("systemInstruction");
+  });
+
+  it("an embedding response without a vector is an error, never an empty vector (M55)", async () => {
+    const client = { models: { embedContent: async () => ({ embeddings: [] }) } } as never;
+    await expect(provider(client).embed!({ input: ["a"] })).rejects.toThrow(/returned no embedding/);
+  });
+
+  it("user text next to tool results follows the functionResponses in the same content (M59)", async () => {
+    const { client, sent } = fake([answer("ok")]);
+    await provider(client).text({
+      messages: [
+        user("?"),
+        { role: "assistant", content: "", toolCalls: [{ id: "x", name: "lookup", input: {} }] },
+        { role: "user", content: "Also: be brief.", toolResults: [{ id: "x", name: "lookup", output: "42" }] },
+      ],
+    });
+    expect(sent[0]!.contents[2]).toEqual({
+      role: "user",
+      parts: [{ functionResponse: { name: "lookup", response: { output: "42" } } }, { text: "Also: be brief." }],
+    });
+  });
+
+  it("a functionCall without args (a no-argument tool) surfaces with input {} (M65)", async () => {
+    // FunctionCall.args is optional in genai.d.ts (2.27.0); a call to a tool without parameters may omit it.
+    const { client } = fake([{ candidates: [{ content: { role: "model", parts: [{ functionCall: { id: "c1", name: "now" } }] }, finishReason: "STOP" }] }]);
+    const res = await provider(client).tools!({ messages: [user("?")], tools: [LOOKUP] });
+    expect(res.calls).toEqual([{ id: "c1", name: "now", input: {} }]);
+  });
+
+  it("a final chunk without usageMetadata keeps the usage an earlier chunk reported (M70)", async () => {
+    const chunks = [
+      { candidates: [{ content: { role: "model", parts: [{ text: "Hi" }] } }], usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 1, totalTokenCount: 4 } },
+      { candidates: [{ content: { role: "model", parts: [{ text: "", thoughtSignature: "c2ln" }] }, finishReason: "STOP" }] },
+    ];
+    const { client } = fake([], [chunks]);
+    const { result } = await drain(provider(client).textStream!({ messages: [user("?")] }));
+    expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 });
+  });
+
+  it("a media-only user message sends only the media, no empty text part (M72)", async () => {
+    const { client, sent } = fake([answer("ok")]);
+    await provider(client).text({ messages: [{ role: "user", content: "", media: [{ kind: "image", mediaType: "image/png", dataBase64: "iVBORw0KGgo=" }] }] });
+    expect(sent[0]!.contents[0]).toEqual({ role: "user", parts: [{ inlineData: { mimeType: "image/png", data: "iVBORw0KGgo=" } }] });
+  });
+
+  it("a tool that returned nothing goes back as { output: null }, not as an empty response (M73)", async () => {
+    const { client, sent } = fake([answer("ok")]);
+    await provider(client).text({
+      messages: [
+        user("?"),
+        { role: "assistant", content: "", toolCalls: [{ id: "x", name: "lookup", input: {} }] },
+        { role: "user", content: "", toolResults: [{ id: "x", name: "lookup", output: undefined }] },
+      ],
+    });
+    expect(sent[0]!.contents[2].parts[0].functionResponse.response).toStrictEqual({ output: null });
+  });
+
+  it("const never overwrites an enum the schema already has (M75)", () => {
+    expect(toGoogleSchema({ type: "string", enum: ["a", "b"], const: "a" }, RESPONSE_KEYWORDS)).toEqual({ type: "string", enum: ["a", "b"] });
+  });
+
+  it("array items are filtered like any other sub-schema (M76)", () => {
+    const schema = {
+      type: "array",
+      items: { type: "object", properties: { a: { type: "string", minLength: 1 } }, additionalProperties: false },
+    };
+    expect(toGoogleSchema(schema, TOOL_KEYWORDS)).toEqual({ type: "array", items: { type: "object", properties: { a: { type: "string" } } } });
+    expect(toGoogleSchema(schema, RESPONSE_KEYWORDS)).toEqual({
+      type: "array",
+      items: { type: "object", properties: { a: { type: "string" } }, additionalProperties: false },
+    });
+  });
+});

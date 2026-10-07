@@ -30,6 +30,13 @@ describe("google through the registry (measurer)", () => {
     expect(sdk.loads).toBe(0);
   });
 
+  it("an empty embed batch on an ADC provider loads no SDK either (measurer, run 2: M53)", async () => {
+    const ai = createAI({ providers: { google: { project: "p" } } });
+    const res = await ai.embed({ model: "google:gemini-embedding-001", input: [] });
+    expect(res.embeddings).toEqual([]);
+    expect(sdk.loads).toBe(0);
+  });
+
   it("a GoogleEndpoint's headers, extraBody and embedModel reach the provider", async () => {
     const ai = createAI({
       providers: {

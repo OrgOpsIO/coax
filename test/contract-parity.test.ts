@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { createAI } from "../src/ai";
+import { CoaxAbortError, CoaxSchemaError } from "../src/client";
 import { anthropic } from "../src/providers/anthropic";
 import { google } from "../src/providers/google";
 import { openai } from "../src/providers/openai";
@@ -283,6 +284,31 @@ describe("contract parity, continued: usage numbers and the stream surfaces (mea
       expect(res.calls.map((c) => [c.name, c.input, c.output])).toEqual([[SCRIPT.call.name, SCRIPT.call.input, 42]]);
       expect(res.usage).toEqual(TWO_CALLS);
       expect(kinds).toEqual(["calling", "tool", "delta"]);
+    });
+  }
+});
+
+// Measurer (stage 1, run 2): the error classes of the contract, not only the results — the same failing
+// call rejects with the same class carrying the same state on every vendor.
+describe("contract parity, continued: error classes (measurer)", () => {
+  for (const vendor of Object.keys(VENDORS)) {
+    const model = `${vendor}:m`;
+
+    it(`${vendor}: exhausted repairs reject with CoaxSchemaError carrying the usage of every attempt and the transcript`, async () => {
+      const err = await aiFor(vendor, "object")
+        .object({ model, schema: z.object({ answer: z.number() }), prompt: "?", maxRepairs: 1 })
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(CoaxSchemaError);
+      const e = err as CoaxSchemaError;
+      expect(e.attempts).toBe(2);
+      expect(e.usage).toEqual(TWO_CALLS);
+      expect(e.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant", "user"]);
+    });
+
+    it(`${vendor}: an aborted call rejects with CoaxAbortError`, async () => {
+      const ctrl = new AbortController();
+      ctrl.abort();
+      await expect(aiFor(vendor, "text").text({ model, prompt: "?", signal: ctrl.signal })).rejects.toBeInstanceOf(CoaxAbortError);
     });
   }
 });

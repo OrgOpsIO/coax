@@ -1,0 +1,34 @@
+{
+  "source": "VERBATIM (trailing comma and the doc's '...' elision in `values` removed) from https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/embeddings/get-text-embeddings and the API reference https://docs.cloud.google.com/vertex-ai/generative-ai/docs/model-reference/text-embeddings-api (2026-10-06). Endpoint: POST https://{REGION}-aiplatform.googleapis.com/v1/projects/{PROJECT}/locations/{REGION}/publishers/google/models/gemini-embedding-001:predict . 'For gemini-embedding-001, each request can only include a single input text.' parameters: { autoTruncate: bool, outputDimensionality: int }. Wire field names are snake_case here (task_type, token_count). Not reachable with an Agent Platform API key (keys cover generateContent/streamGenerateContent only).",
+  "kind": "rest-predict-request-response",
+  "fixture": {
+    "request": {
+      "instances": [
+        {
+          "task_type": "RETRIEVAL_DOCUMENT",
+          "title": "document title",
+          "content": "I would like embeddings for this text!"
+        }
+      ]
+    },
+    "response": {
+      "predictions": [
+        {
+          "embeddings": {
+            "values": [
+              0.0058424929156899452,
+              0.011848051100969315,
+              0.032247550785541534,
+              -0.031829461455345154,
+              -0.055369812995195389
+            ],
+            "statistics": {
+              "token_count": 4,
+              "truncated": false
+            }
+          }
+        }
+      ]
+    }
+  }
+}
