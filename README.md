@@ -155,7 +155,7 @@ createAI({
 ### Google (Gemini on the Agent Platform)
 
 `google` talks to Gemini on Google's Gemini Enterprise Agent Platform (formerly Vertex AI) through Google's
-own SDK. It needs Node 20 or newer (the other providers still run on 18). Two credentials, one per
+own SDK. Two credentials, one per
 provider:
 
 ```ts
@@ -306,7 +306,7 @@ abort happened inside `ai.run()`, so an aborted run is exactly as resumable as o
 A failed call that the vendor still billed is booked the same way, whichever provider raised it: a refusal
 (`CoaxRefusalError` carries its `usage`), a Gemini turn that ended without a usable answer, an embedding
 batch cut short after some inputs. `onUsage` sees each once, `billedUsage(err)` returns what the failed
-call cost, and inside a run it counts toward the run's usage and budget. Such an attempt that coax retried
+call cost, and inside `ai.run()` or `ai.loop()` it counts toward the budget (and toward the run's usage). Such an attempt that coax retried
 is added to the `usage` of the call that finally succeeds (or rides on the error that finally escapes). A provider
 of your own marks such an error with `withBilledUsage(err, usage)`. The `onUsage` hook and any `Budget` see
 every turn as it happens either way — the error fields close the gap for callers who account from results.

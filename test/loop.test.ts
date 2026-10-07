@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { runLoop, CoaxLoopError } from "../src/loop";
 import { createBudget } from "../src/budget";
-import { emptyUsage } from "../src/types";
-import { CoaxAbortError, type ObjectResult } from "../src/client";
+import { emptyUsage, withBilledUsage } from "../src/types";
+import { CoaxAbortError, CoaxSchemaError, type ObjectResult } from "../src/client";
 
 const Step = z.discriminatedUnion("action", [
   z.object({ action: z.literal("fetch"), query: z.string() }),
@@ -131,6 +131,51 @@ describe("runLoop", () => {
     }).catch((e) => e);
     expect(err).toBeInstanceOf(CoaxAbortError);
     expect(err.usage.inputTokens).toBe(10); // the one completed turn
+  });
+});
+
+describe("runLoop budget on a failed turn", () => {
+  // One completed turn (10 tokens), then a turn that throws `err`.
+  function failingSecondTurn(err: unknown) {
+    let i = 0;
+    return async (): Promise<ObjectResult<StepT>> => {
+      if (i++ === 0) return { data: { action: "fetch", query: "x" }, usage: { ...emptyUsage(), inputTokens: 10 }, model: "mock", repairs: 0 };
+      throw err;
+    };
+  }
+  const run = (object: unknown, budget: ReturnType<typeof createBudget>) =>
+    runLoop<StepT, string>(object as never, {
+      schema: Step,
+      messages: [{ role: "user", content: "?" }],
+      budget,
+      onStep: async () => ({ done: false, reply: "more" }),
+    });
+
+  it("records what a failed call was billed, and the error goes through unchanged", async () => {
+    const err = withBilledUsage(new Error("no usable answer"), { ...emptyUsage(), inputTokens: 60 });
+    const budget = createBudget(null);
+    await expect(run(failingSecondTurn(err), budget)).rejects.toBe(err);
+    expect(budget.spent()).toBe(70);
+  });
+
+  it("records every round of a CoaxSchemaError", async () => {
+    const err = new CoaxSchemaError("coax: could not produce a valid output", "x", 3, { ...emptyUsage(), inputTokens: 30, outputTokens: 12 });
+    const budget = createBudget(null);
+    await expect(run(failingSecondTurn(err), budget)).rejects.toBe(err);
+    expect(budget.spent()).toBe(52);
+  });
+
+  it("records what an aborted call was billed", async () => {
+    const err = withBilledUsage(new CoaxAbortError({ ...emptyUsage(), inputTokens: 5 }), { ...emptyUsage(), inputTokens: 5 });
+    const budget = createBudget(null);
+    await expect(run(failingSecondTurn(err), budget)).rejects.toBeInstanceOf(CoaxAbortError);
+    expect(budget.spent()).toBe(15);
+  });
+
+  it("records nothing for a failure that cost nothing", async () => {
+    const budget = createBudget(null);
+    await expect(run(failingSecondTurn(new Error("503")), budget)).rejects.toThrow("503");
+    expect(budget.spent()).toBe(10);
   });
 });
 
