@@ -176,7 +176,9 @@ An API key reaches generation only — text, structured output, streaming, tools
 `{ project }` form; on a key-only provider `ai.embed()` raises `CoaxUnsupportedError`. `location` defaults
 to `"global"`, where the newest models are served. A key is served from `"global"` only, so a region
 (data residency) needs the `{ project }` form. Naming `apiKey` together with `project`, `googleAuthOptions`
-or a location other than `"global"` is a config error, not a guess about which one you meant.
+or a location other than `"global"` is a config error, not a guess about which one you meant. So are the
+OpenAI-wire keys (`baseURL`, `tokenParam`, `strict`, `transcribeModel`, `speakModel`): `google` has no base
+URL, and a gateway that puts an OpenAI-compatible API in front of Gemini is `api: "openai"`.
 
 What to know, briefly:
 
@@ -199,10 +201,15 @@ What to know, briefly:
   temperature without wiping coax's own settings.
 - **Safety blocks** — a blocked prompt or a response stopped by a filter — throw `CoaxRefusalError` with
   Google's block or finish reason as `category` and the billed `usage`. Never an empty success.
+- **A turn without a usable answer** (`MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`, …) throws an
+  `Error` naming the finish reason, and is billed like a refusal (see
+  [Failed runs still cost tokens](#failed-runs-still-cost-tokens)).
 - **Caching is automatic** on the platform; hits show up as `cacheReadTokens`, and the `cache` /
   `cacheConversation` flags are no-ops.
 - **Usage** counts thinking tokens as output, as they are billed.
 - **`embed`** sends one request per input — every current Gemini embedding model takes one input at a time.
+  The inputs done before an abort or a failure were billed and are reported. A retry starts the batch over,
+  so it re-bills the inputs it had finished; the result's `usage` counts both attempts.
 
 ### Forwarding the caller's identity
 
@@ -294,10 +301,25 @@ A run that dies is booked, not lost: `CoaxToolError` and `CoaxLoopError` carry t
 completed turns plus the transcript up to the failure (`messages`, and `calls` for tool runs),
 `CoaxSchemaError` carries the usage *and* the transcript (including every repair reprompt) of its failed
 attempts, and `CoaxAbortError` carries what was spent before the abort — plus `messages`/`calls` when the
-abort happened inside `ai.run()`, so an aborted run is exactly as resumable as one that hit a limit. A
-safety refusal is billed too: `CoaxRefusalError` carries the `usage` of the refused call, `onUsage` sees it,
-and inside a run it counts toward the run's usage and budget. The `onUsage` hook and any `Budget` see every
-turn as it happens either way — the error fields close the gap for callers who account from results.
+abort happened inside `ai.run()`, so an aborted run is exactly as resumable as one that hit a limit.
+
+A failed call that the vendor still billed is booked the same way, whichever provider raised it: a refusal
+(`CoaxRefusalError` carries its `usage`), a Gemini turn that ended without a usable answer, an embedding
+batch cut short after some inputs. `onUsage` sees each once, `billedUsage(err)` returns what the failed
+call cost, and inside a run it counts toward the run's usage and budget. Such an attempt that coax retried
+is added to the `usage` of the call that finally succeeds (or rides on the error that finally escapes). A provider
+of your own marks such an error with `withBilledUsage(err, usage)`. The `onUsage` hook and any `Budget` see
+every turn as it happens either way — the error fields close the gap for callers who account from results.
+
+```ts
+try {
+  await ai.text({ model: "flash", prompt });
+} catch (err) {
+  const cost = billedUsage(err);       // undefined when the failure cost nothing
+  if (cost) book(cost);
+  throw err;
+}
+```
 
 **Breaking in 0.6:** `ai.run()` now wraps *every* failed model call — not just hitting `maxSteps` or the
 budget — in `CoaxToolError`, with the original error as `.cause` and the same partial state riding along.

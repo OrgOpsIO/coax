@@ -33,7 +33,7 @@ export type { GoogleOptions } from "./providers/google";
 // Building blocks / types.
 export { extractJson } from "./parse";
 export { toProviderSchema, formatIssues, safeParse } from "./schema";
-export { addUsage, emptyUsage, CoaxRefusalError } from "./types";
+export { addUsage, emptyUsage, billedUsage, withBilledUsage, CoaxRefusalError } from "./types";
 export type {
   AudioFormat,
   AudioInput,

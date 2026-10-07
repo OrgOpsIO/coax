@@ -1,7 +1,7 @@
 import type { ZodType } from "zod";
 import {
   addUsage,
-  CoaxRefusalError,
+  billedUsage,
   emptyUsage,
   type Message,
   type ToolCall,
@@ -229,14 +229,15 @@ export async function* runToolsStream<C = unknown, T = unknown>(
       }
       res = cur.value;
     } catch (err) {
-      // An abort mid-call carries only that call's (empty) usage — add what this run spent before it,
-      // plus the transcript/calls so far, so an aborted run is resumable exactly like a CoaxToolError.
+      // A failed turn that was still billed (a refusal, a turn without a usable answer — see `billedUsage`)
+      // counts toward the run's budget, and toward its usage below.
+      const billed = billedUsage(err);
+      if (billed) opts.budget?.record(billed);
+      // An abort mid-call carries only that call's usage (what it was billed, if anything) — add what this
+      // run spent before it, plus the transcript/calls so far, so an aborted run is resumable exactly like a
+      // CoaxToolError.
       if (err instanceof CoaxAbortError) throw new CoaxAbortError(addUsage(usage, err.usage), err, messages, calls);
-      // A refused turn was still billed — it counts toward the run's usage and its budget.
-      if (err instanceof CoaxRefusalError) {
-        usage = addUsage(usage, err.usage);
-        opts.budget?.record(err.usage);
-      }
+      if (billed) usage = addUsage(usage, billed);
       // Any other provider failure (a 500, a timeout, …) is wrapped the same way — see CoaxToolError's
       // doc comment for why this is a behavior change from 0.5.
       const message = err instanceof Error ? err.message : String(err);

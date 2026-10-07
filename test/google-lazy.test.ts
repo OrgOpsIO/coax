@@ -66,6 +66,22 @@ describe("google: lazy SDK loading and constructor options (T2)", () => {
     expect(sdk.constructed.at(-1)).toEqual({ enterprise: true, apiKey: "k" });
   });
 
+  // Review R1.12: a ProviderEndpoint-shaped config compiles under google; its keys must not be dropped.
+  it("ProviderEndpoint-only keys under google (baseURL, tokenParam, strict, transcribeModel, speakModel) reject the call; no client is constructed", async () => {
+    const before = sdk.constructed.length;
+    const proxied = createAI({ providers: { google: { apiKey: "k", baseURL: "https://llm-proxy.internal.example/" } } });
+    await expect(proxied.text({ model: "google:gemini-3.5-flash", prompt: "?" })).rejects.toThrow(/has no baseURL .* use `api: "openai"`/);
+    // Under a free name with api "google" the object is not a literal of either member, as in a config file read at runtime.
+    const named: Record<string, unknown> = { api: "google", project: "p", baseURL: "https://llm-proxy.internal.example/" };
+    const gateway = createAI({ providers: { gemini: named as never } });
+    await expect(gateway.text({ model: "gemini:gemini-3.5-flash", prompt: "?" })).rejects.toThrow(/provider "gemini" \(api "google"\) has no baseURL/);
+    for (const extra of [{ tokenParam: "max_tokens" }, { strict: false }, { transcribeModel: "t" }, { speakModel: "s" }]) {
+      const ai = createAI({ providers: { google: { apiKey: "k", ...extra } as never } });
+      await expect(ai.text({ model: "google:gemini-3.5-flash", prompt: "?" })).rejects.toThrow(`does not take \`${Object.keys(extra)[0]}\``);
+    }
+    expect(sdk.constructed.length).toBe(before);
+  });
+
   it("a provider constructs its client once and reuses it", async () => {
     const before = sdk.constructed.length;
     const ai = createAI({ providers: { google: "k" } });

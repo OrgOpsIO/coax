@@ -1,9 +1,9 @@
 import type { AIConfig, GoogleEndpoint, ProviderEndpoint, RetryConfig } from "./config";
-import type { Provider, ReasoningEffort } from "./types";
 import { anthropic } from "./providers/anthropic";
 import { google } from "./providers/google";
 import { openai } from "./providers/openai";
 import { withRetry } from "./retry";
+import { addUsage, billedUsage, emptyUsage, withBilledUsage, type Provider, type ReasoningEffort, type Usage } from "./types";
 
 /** Settings that ride on the model alias itself rather than the provider instance — see `resolve()`. */
 export interface CallSettings {
@@ -25,24 +25,49 @@ export interface ResolvedModel {
   callSettings: CallSettings;
 }
 
+/**
+ * `withRetry` for one provider call that keeps what failed attempts were billed (`billedUsage`, e.g. an
+ * embed batch that died halfway on a 503): the retry re-bills that work, so the result that finally
+ * succeeds carries both, and an error that finally escapes is marked with all of it.
+ */
+async function withBilledRetry<R extends { usage: Usage }>(fn: () => Promise<R>, cfg: RetryConfig | undefined, signal: AbortSignal | undefined): Promise<R> {
+  let lost: Usage | undefined;
+  const attempt = async (): Promise<R> => {
+    try {
+      return await fn();
+    } catch (err) {
+      const billed = billedUsage(err);
+      if (billed) lost = addUsage(lost ?? emptyUsage(), billed);
+      throw err;
+    }
+  };
+  try {
+    const res = await withRetry(attempt, cfg, signal);
+    return lost ? { ...res, usage: addUsage(lost, res.usage) } : res;
+  } catch (err) {
+    if (lost && typeof err === "object" && err !== null) withBilledUsage(err, lost);
+    throw err;
+  }
+}
+
 /** Wrap a provider so its calls retry transient errors (rate limits / 5xx / network). */
 export function retrying(provider: Provider, cfg?: RetryConfig): Provider {
   return {
     name: provider.name,
     model: provider.model,
-    structured: (req) => withRetry(() => provider.structured(req), cfg, req.signal),
-    text: (req) => withRetry(() => provider.text(req), cfg, req.signal),
+    structured: (req) => withBilledRetry(() => provider.structured(req), cfg, req.signal),
+    text: (req) => withBilledRetry(() => provider.text(req), cfg, req.signal),
     // A stream is never retried mid-flight (deltas already reached the consumer); failures before the
     // first delta are covered by the ai-layer fallback instead.
     ...(provider.textStream ? { textStream: (req: Parameters<NonNullable<Provider["textStream"]>>[0]) => provider.textStream!(req) } : {}),
     ...(provider.structuredStream ? { structuredStream: (req: Parameters<NonNullable<Provider["structuredStream"]>>[0]) => provider.structuredStream!(req) } : {}),
     ...(provider.toolsStream ? { toolsStream: (req: Parameters<NonNullable<Provider["toolsStream"]>>[0]) => provider.toolsStream!(req) } : {}),
-    ...(provider.embed ? { embed: (req: Parameters<NonNullable<Provider["embed"]>>[0]) => withRetry(() => provider.embed!(req), cfg, req.signal) } : {}),
+    ...(provider.embed ? { embed: (req: Parameters<NonNullable<Provider["embed"]>>[0]) => withBilledRetry(() => provider.embed!(req), cfg, req.signal) } : {}),
     // Optional capabilities are forwarded only where the provider has them, so `capability is missing`
     // stays detectable through the wrapper.
-    ...(provider.tools ? { tools: (req: Parameters<NonNullable<Provider["tools"]>>[0]) => withRetry(() => provider.tools!(req), cfg, req.signal) } : {}),
-    ...(provider.transcribe ? { transcribe: (req: Parameters<NonNullable<Provider["transcribe"]>>[0]) => withRetry(() => provider.transcribe!(req), cfg, req.signal) } : {}),
-    ...(provider.speak ? { speak: (req: Parameters<NonNullable<Provider["speak"]>>[0]) => withRetry(() => provider.speak!(req), cfg, req.signal) } : {}),
+    ...(provider.tools ? { tools: (req: Parameters<NonNullable<Provider["tools"]>>[0]) => withBilledRetry(() => provider.tools!(req), cfg, req.signal) } : {}),
+    ...(provider.transcribe ? { transcribe: (req: Parameters<NonNullable<Provider["transcribe"]>>[0]) => withBilledRetry(() => provider.transcribe!(req), cfg, req.signal) } : {}),
+    ...(provider.speak ? { speak: (req: Parameters<NonNullable<Provider["speak"]>>[0]) => withBilledRetry(() => provider.speak!(req), cfg, req.signal) } : {}),
   };
 }
 
@@ -61,6 +86,18 @@ export function createRegistry(config: AIConfig) {
       );
     }
     if (api === "google") {
+      // A ProviderEndpoint-shaped config type-checks here too (it is a member of the ProviderConfig union),
+      // but google has no use for these keys — dropping a baseURL would send the caller's traffic to
+      // Google's public host instead of their proxy, so each is a config error, never ignored.
+      for (const key of ["baseURL", "tokenParam", "strict", "transcribeModel", "speakModel"] as const) {
+        if ((endpoint as ProviderEndpoint)[key] === undefined) continue;
+        throw new Error(
+          key === "baseURL"
+            ? `coax: provider "${providerName}" (api "google") has no baseURL — the SDK talks to the Agent Platform directly; ` +
+                `for an OpenAI-compatible gateway in front of Gemini, use \`api: "openai"\` with that baseURL`
+            : `coax: provider "${providerName}" (api "google") does not take \`${key}\` — it belongs to the OpenAI wire`,
+        );
+      }
       const g = endpoint as GoogleEndpoint;
       return google({
         model,

@@ -177,7 +177,15 @@ describe("google through the real SDK (fetch stubbed)", () => {
   });
 
   it("an abort reaches fetch and the call rejects with CoaxAbortError", async () => {
-    reply((s) => new Promise<Response>((_, reject) => s.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")))));
+    // Like real fetch, also when the abort landed before the request was made (a cold SDK import can take
+    // longer than the 5 ms below; listening for a future event alone then hung the test — fixer, run 2).
+    reply(
+      (s) =>
+        new Promise<Response>((_, reject) => {
+          if (s.signal?.aborted) reject(new DOMException("aborted", "AbortError"));
+          s.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+        }),
+    );
     const ctrl = new AbortController();
     setTimeout(() => ctrl.abort(), 5);
     await expect(keyAI().text({ model: "flash", prompt: "?", signal: ctrl.signal })).rejects.toBeInstanceOf(CoaxAbortError);

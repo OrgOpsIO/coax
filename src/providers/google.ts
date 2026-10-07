@@ -16,6 +16,7 @@ import {
   type ToolsRequest,
   type ToolsResponse,
   type Usage,
+  withBilledUsage,
 } from "../types";
 
 export interface GoogleOptions {
@@ -336,11 +337,16 @@ export function google(opts: GoogleOptions): Provider {
     }
   }
 
-  function assertFinished(sawCandidate: boolean, finishReason: string | undefined, finishMessage: string | undefined): void {
-    if (!sawCandidate) throw new Error(`coax: google model ${opts.model} returned no candidates`);
+  // A turn without a usable answer (MALFORMED_FUNCTION_CALL & co., or no candidate at all) was still billed:
+  // its usage is marked on the error, so coax reports and counts it like a refusal's.
+  function assertFinished(sawCandidate: boolean, finishReason: string | undefined, finishMessage: string | undefined, usage: Usage): void {
+    if (!sawCandidate) throw withBilledUsage(new Error(`coax: google model ${opts.model} returned no candidates`), usage);
     if (finishReason && !USABLE_FINISH.has(finishReason)) {
-      throw new Error(
-        `coax: google model ${opts.model} ended the turn without a usable answer (finishReason "${finishReason}"${finishMessage ? `: ${finishMessage}` : ""})`,
+      throw withBilledUsage(
+        new Error(
+          `coax: google model ${opts.model} ended the turn without a usable answer (finishReason "${finishReason}"${finishMessage ? `: ${finishMessage}` : ""})`,
+        ),
+        usage,
       );
     }
   }
@@ -351,7 +357,7 @@ export function google(opts: GoogleOptions): Provider {
     const usage = mapUsage(resp.usageMetadata);
     assertNotBlocked(resp, usage);
     const candidate = resp.candidates?.[0];
-    assertFinished(candidate !== undefined, candidate?.finishReason, candidate?.finishMessage);
+    assertFinished(candidate !== undefined, candidate?.finishReason, candidate?.finishMessage, usage);
     return { parts: [...(candidate?.content?.parts ?? [])], usage };
   }
 
@@ -387,7 +393,7 @@ export function google(opts: GoogleOptions): Provider {
         finishMessage = candidate.finishMessage;
       }
     }
-    assertFinished(sawCandidate, finishReason, finishMessage);
+    assertFinished(sawCandidate, finishReason, finishMessage, usage);
     return { parts, usage };
   }
 
@@ -455,17 +461,26 @@ export function google(opts: GoogleOptions): Provider {
       };
       const embeddings: number[][] = [];
       let tokens = 0;
-      // One request per input, in order: gemini-embedding-001 takes a single input per request and the
-      // SDK refuses more than one content for gemini-embedding-2.
-      for (const input of inputs) {
-        if (req.signal?.aborted) throw new CoaxAbortError();
-        const resp = await c.models.embedContent({ model, contents: [input], ...(Object.keys(embedConfig).length ? { config: embedConfig } : {}) });
-        const embedding = resp.embeddings?.[0];
-        if (!embedding?.values) throw new Error(`coax: google model ${model} returned no embedding`);
-        embeddings.push(embedding.values);
-        tokens += embedding.statistics?.tokenCount ?? 0;
+      const spent = (): Usage => ({ ...emptyUsage(), inputTokens: tokens });
+      try {
+        // One request per input, in order: gemini-embedding-001 takes a single input per request and the
+        // SDK refuses more than one content for gemini-embedding-2.
+        for (const input of inputs) {
+          if (req.signal?.aborted) throw new CoaxAbortError(spent());
+          const resp = await c.models.embedContent({ model, contents: [input], ...(Object.keys(embedConfig).length ? { config: embedConfig } : {}) });
+          const embedding = resp.embeddings?.[0];
+          if (!embedding?.values) throw new Error(`coax: google model ${model} returned no embedding`);
+          embeddings.push(embedding.values);
+          tokens += embedding.statistics?.tokenCount ?? 0;
+        }
+      } catch (err) {
+        // The inputs embedded before an abort or a failure were billed — they ride on what is thrown. An
+        // abort becomes coax's own CoaxAbortError here, which the client keeps (and reports) as it is.
+        const failure = req.signal?.aborted && !(err instanceof CoaxAbortError) ? new CoaxAbortError(spent(), err) : err;
+        if (tokens && typeof failure === "object" && failure !== null) withBilledUsage(failure, spent());
+        throw failure;
       }
-      return { embeddings, usage: { ...emptyUsage(), inputTokens: tokens }, model };
+      return { embeddings, usage: spent(), model };
     };
   }
 

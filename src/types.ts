@@ -295,7 +295,33 @@ export class CoaxRefusalError extends Error {
     super(`coax: ${model} refused the request${category ? ` (category "${category}")` : ""}` + (explanation ? ` — ${explanation}` : ""));
     this.name = "CoaxRefusalError";
     this.usage = usage;
+    withBilledUsage(this, usage);
   }
+}
+
+// Symbol.for, not Symbol: two copies of coax in one process (ESM + CJS builds) must read each other's marks.
+const BILLED = Symbol.for("coax.billedUsage");
+
+/**
+ * What a FAILED call was still billed for, or undefined when its failure cost nothing (or the provider
+ * cannot tell). A refused prompt, a turn that ended without a usable answer, an embed batch that died
+ * after some inputs: each cost tokens, and coax reports them through `onUsage` once and counts them in
+ * `ai.run()`'s usage and budget, whatever the vendor. Only that failed call's own tokens — what earlier
+ * completed calls of the same loop cost was reported as each one completed. `CoaxRefusalError` always
+ * carries it (equal to its `usage`).
+ */
+export function billedUsage(err: unknown): Usage | undefined {
+  return typeof err === "object" && err !== null ? (err as { [BILLED]?: Usage })[BILLED] : undefined;
+}
+
+/**
+ * Marks `err` as a failure that was still billed `usage`, and returns it — for a provider that throws
+ * after the vendor already charged (see `billedUsage`). Keeps the error's class, message and fields, so
+ * `withRetry` still sees its status. Non-enumerable: invisible to JSON and to deep equality.
+ */
+export function withBilledUsage<E extends object>(err: E, usage: Usage): E {
+  Object.defineProperty(err, BILLED, { value: usage, configurable: true, writable: true, enumerable: false });
+  return err;
 }
 
 export const emptyUsage = (): Usage => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
