@@ -3,6 +3,8 @@ import { extractJson } from "./parse";
 import { formatIssues, safeParse, toProviderSchema } from "./schema";
 import {
   addUsage,
+  billedUsage,
+  CoaxRefusalError,
   emptyUsage,
   type EmbedRequest,
   type EmbedResponse,
@@ -39,7 +41,9 @@ export class CoaxSchemaError extends Error {
 /**
  * Raised when a call is cancelled through its AbortSignal — the one error to check for "the user hung
  * up", regardless of which layer (SDK, repair loop, tool run) the abort landed in. `usage` carries what
- * the completed turns before the abort cost; the aborted call itself reports nothing. `messages`/`calls`
+ * the completed turns before the abort cost; the aborted call itself reports nothing — unless the provider
+ * raised the abort itself and marked what the call was already billed (`billedUsage`, e.g. the inputs an
+ * embed batch finished), which is then in `usage` and reported through `onUsage` once. `messages`/`calls`
  * are populated by `runTools` so an aborted `ai.run()` is resumable exactly like a `CoaxToolError` —
  * everywhere else (object/text/…) there is no transcript to carry, so they stay empty.
  */
@@ -57,6 +61,16 @@ export class CoaxAbortError extends Error {
 }
 
 /**
+ * The CoaxAbortError for whatever was thrown after an abort. The abort takes precedence: anything else
+ * (a refusal that raced the abort included) becomes a plain CoaxAbortError that reports nothing. A
+ * CoaxAbortError the provider raised itself passes through untouched — with what it says the aborted call
+ * was billed (`billedUsage`), which is then reported once.
+ */
+function abortedBy(spent: Usage, err: unknown): CoaxAbortError {
+  return err instanceof CoaxAbortError ? err : new CoaxAbortError(spent, err);
+}
+
+/**
  * Run one provider call under the caller's AbortSignal: fail fast when already aborted, and normalize
  * whatever the SDK throws after an abort (APIUserAbortError, DOMException, …) to CoaxAbortError.
  * `spent` supplies the usage accumulated so far in the surrounding loop.
@@ -66,8 +80,7 @@ async function aborting<T>(signal: AbortSignal | undefined, spent: () => Usage, 
   try {
     return await fn();
   } catch (err) {
-    if (signal?.aborted && !(err instanceof CoaxAbortError)) throw new CoaxAbortError(spent(), err);
-    throw err;
+    throw signal?.aborted ? abortedBy(spent(), err) : err;
   }
 }
 
@@ -90,7 +103,7 @@ export interface ObjectRequest<T> {
   maxTokens?: number;
   /** How many reprompt-on-validation-failure rounds. Default 2. */
   maxRepairs?: number;
-  /** Cache the system prompt at the provider (Anthropic cache_control; no-op on OpenAI). */
+  /** Cache the system prompt at the provider (Anthropic cache_control; no-op on OpenAI and Google). */
   cache?: boolean;
   /** Mark the conversation-so-far as reusable for the loop's next call. See `BaseRequest.cacheConversation`. */
   cacheConversation?: boolean;
@@ -100,7 +113,7 @@ export interface ObjectRequest<T> {
   signal?: AbortSignal;
   /** How hard the model should think. Sent on the wire only when set. See `BaseRequest.reasoningEffort`. */
   reasoningEffort?: ReasoningEffort;
-  /** Merged flat into the wire body, last — MAY override coax's own fields. See `BaseRequest.extraBody`. */
+  /** Merged into the wire body, last (flat; deep on Google) — MAY override coax's own fields. See `BaseRequest.extraBody`. */
   extraBody?: Record<string, unknown>;
 }
 
@@ -201,6 +214,24 @@ function toMessages(prompt: string | undefined, messages: Message[] | undefined)
 export function createClient(opts: ClientOptions): Client {
   const { provider, onUsage } = opts;
 
+  // A failed call that was still billed (a refused prompt, a turn without a usable answer, an embed batch
+  // cut short — whatever the provider marked, see `billedUsage`) is reported like any completed call, then
+  // the error goes through unchanged. An abort keeps precedence — `abortedBy()` has already turned anything
+  // thrown after `signal.aborted` into a CoaxAbortError (see there for the one that carries a mark).
+  async function reportBilled(err: unknown): Promise<void> {
+    const usage = billedUsage(err);
+    if (usage) await onUsage?.(usage, err instanceof CoaxRefusalError ? err.model : provider.model);
+  }
+
+  async function billed<T>(signal: AbortSignal | undefined, spent: () => Usage, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await aborting(signal, spent, fn);
+    } catch (err) {
+      await reportBilled(err);
+      throw err;
+    }
+  }
+
   /** Resolve an optional provider capability, or fail with a message that names the missing piece. */
   function capability<K extends "tools" | "transcribe" | "speak" | "embed">(key: K, label: string): NonNullable<Provider[K]> {
     const fn = provider[key];
@@ -222,7 +253,7 @@ export function createClient(opts: ClientOptions): Client {
       let lastError = "";
 
       for (let attempt = 0; attempt <= maxRepairs; attempt++) {
-        const res = await aborting(req.signal, () => usage, () =>
+        const res = await billed(req.signal, () => usage, () =>
           provider.structured({
             system: req.system,
             messages,
@@ -257,7 +288,7 @@ export function createClient(opts: ClientOptions): Client {
     },
 
     async text(req): Promise<TextResult> {
-      const res = await aborting(req.signal, emptyUsage, () =>
+      const res = await billed(req.signal, emptyUsage, () =>
         provider.text({
           system: req.system,
           messages: toMessages(req.prompt, req.messages),
@@ -329,12 +360,13 @@ export function createClient(opts: ClientOptions): Client {
             }
             res = cur.value;
           } catch (err) {
-            if (req.signal?.aborted && !(err instanceof CoaxAbortError)) throw new CoaxAbortError(usage, err);
-            throw err;
+            const failure = req.signal?.aborted ? abortedBy(usage, err) : err;
+            await reportBilled(failure);
+            throw failure;
           }
         } else {
           // No native structured streaming → one non-streaming call; the final object is the only partial.
-          res = await aborting(req.signal, () => usage, () => provider.structured(wire));
+          res = await billed(req.signal, () => usage, () => provider.structured(wire));
           const whole = unwrap(extractJson(res.raw));
           if (whole !== undefined) yield whole;
         }
@@ -358,7 +390,7 @@ export function createClient(opts: ClientOptions): Client {
     },
 
     async embed(req: EmbedRequest): Promise<EmbedResponse> {
-      const res = await aborting(req.signal, emptyUsage, () => capability("embed", "embeddings")(req));
+      const res = await billed(req.signal, emptyUsage, () => capability("embed", "embeddings")(req));
       await onUsage?.(res.usage, res.model);
       return { embeddings: res.embeddings, usage: res.usage, model: res.model };
     },
@@ -378,7 +410,7 @@ export function createClient(opts: ClientOptions): Client {
 
       // No native streaming on this provider → one non-streaming call, its whole text as one delta.
       if (!provider.textStream) {
-        const res = await aborting(req.signal, emptyUsage, () => provider.text(wire));
+        const res = await billed(req.signal, emptyUsage, () => provider.text(wire));
         await onUsage?.(res.usage, res.model);
         if (res.text) yield res.text;
         return { text: res.text, usage: res.usage, model: res.model };
@@ -397,13 +429,14 @@ export function createClient(opts: ClientOptions): Client {
         return { text: res.text, usage: res.usage, model: res.model };
       } catch (err) {
         // Same normalization as `aborting()` — but around iteration, so a mid-stream abort lands here too.
-        if (req.signal?.aborted && !(err instanceof CoaxAbortError)) throw new CoaxAbortError(emptyUsage(), err);
-        throw err;
+        const failure = req.signal?.aborted ? abortedBy(emptyUsage(), err) : err;
+        await reportBilled(failure);
+        throw failure;
       }
     },
 
     async tools(req: ToolsRequest): Promise<ToolsResponse> {
-      const res = await aborting(req.signal, emptyUsage, () => capability("tools", "tool calling")(req));
+      const res = await billed(req.signal, emptyUsage, () => capability("tools", "tool calling")(req));
       await onUsage?.(res.usage, res.model);
       return res;
     },
@@ -411,7 +444,7 @@ export function createClient(opts: ClientOptions): Client {
     async *toolsStream(req: ToolsRequest): AsyncGenerator<string, ToolsResponse, void> {
       if (!provider.toolsStream) {
         // Non-streaming degrade — the turn still needs the tools capability to exist at all.
-        const res = await aborting(req.signal, emptyUsage, () => capability("tools", "tool calling")(req));
+        const res = await billed(req.signal, emptyUsage, () => capability("tools", "tool calling")(req));
         await onUsage?.(res.usage, res.model);
         return res;
       }
@@ -426,19 +459,20 @@ export function createClient(opts: ClientOptions): Client {
         await onUsage?.(cur.value.usage, cur.value.model);
         return cur.value;
       } catch (err) {
-        if (req.signal?.aborted && !(err instanceof CoaxAbortError)) throw new CoaxAbortError(emptyUsage(), err);
-        throw err;
+        const failure = req.signal?.aborted ? abortedBy(emptyUsage(), err) : err;
+        await reportBilled(failure);
+        throw failure;
       }
     },
 
     async transcribe(req: TranscribeRequest): Promise<TranscribeResult> {
-      const res: TranscribeResponse = await aborting(req.signal, emptyUsage, () => capability("transcribe", "transcription")(req));
+      const res: TranscribeResponse = await billed(req.signal, emptyUsage, () => capability("transcribe", "transcription")(req));
       await onUsage?.(res.usage, res.model);
       return { text: res.text, usage: res.usage, model: res.model };
     },
 
     async speak(req: SpeakRequest): Promise<SpeakResult> {
-      const res: SpeakResponse = await aborting(req.signal, emptyUsage, () => capability("speak", "speech synthesis")(req));
+      const res: SpeakResponse = await billed(req.signal, emptyUsage, () => capability("speak", "speech synthesis")(req));
       await onUsage?.(res.usage, res.model);
       return { audio: res.audio, mediaType: res.mediaType, usage: res.usage, model: res.model };
     },

@@ -5,14 +5,15 @@ Pure TypeScript. No native modules, no codegen, no DSL, no vendor lock-in.
 
 Configure your provider keys once, pick a model by name, hand it a [Zod](https://zod.dev) schema (or a
 prompt file), and get back typed, validated data — with retries, model fallback, and self-repair handled
-for you. The same configuration also gives you **tools**, **voice** (speech-to-text and back), and any
-**OpenAI-/Anthropic-compatible endpoint** — a frontier API and your own self-hosted model side by side.
+for you. The same configuration also gives you **tools**, **voice** (speech-to-text and back), **Gemini**
+on Google's Agent Platform, and any **OpenAI-/Anthropic-compatible endpoint** — a frontier API and your
+own self-hosted model side by side.
 
 ```bash
 npm install @orgops/coax zod
 ```
 
-The Anthropic and OpenAI SDKs ship *inside* coax — nothing else to install.
+The Anthropic, OpenAI and Google SDKs ship *inside* coax — nothing else to install.
 
 ## Configure once, use `ai` everywhere
 
@@ -27,12 +28,14 @@ configure({
   providers: {
     anthropic: process.env.ANTHROPIC_API_KEY!,   // string key, or { apiKey, baseURL }
     openai: process.env.OPENAI_API_KEY!,
+    google: process.env.GOOGLE_API_KEY!,         // Agent Platform key, or { project } — see Google below
   },
   models: {
     default: "anthropic:claude-sonnet-4-6",
     smart:   { use: "anthropic:claude-opus-4-8", fallback: "anthropic:claude-sonnet-4-6" },
     fast:    "anthropic:claude-haiku-4-5",
     cheap:   "openai:gpt-5-mini",
+    flash:   "google:gemini-3.5-flash",
   },
   defaults: { model: "default", maxRepairs: 2, retries: { attempts: 3 } },
   onUsage: (usage, meta) => track(usage, meta),   // one hook for all your LLM cost/latency
@@ -56,7 +59,7 @@ const { text } = await ai.text({ model: "fast", prompt: "Write a haiku about Typ
 ```
 
 Using `ai` before `configure()` throws a clear error — so the setup is explicit and enforced. Switching
-provider is one word (`"anthropic:…"` → `"openai:…"`); everything else stays the same.
+provider is one word (`"anthropic:…"` → `"openai:…"` → `"google:…"`); everything else stays the same.
 
 ### Nuxt / Nitro
 
@@ -110,8 +113,8 @@ output, omit it for text.
 
 ## Any provider — including your own
 
-`anthropic` and `openai` are built in from a bare API key. For **anything speaking one of those two wire
-protocols** — your own gateway, vLLM, LM Studio, a local runtime — name the provider whatever you like
+`anthropic`, `openai` and `google` are built in from a bare API key. For **anything speaking the
+Anthropic or OpenAI wire protocol** — your own gateway, vLLM, LM Studio, a local runtime — name the provider whatever you like
 and say which protocol it speaks:
 
 ```ts
@@ -140,14 +143,73 @@ endpoint into grammar-guaranteed structured output — the schema's *shape* can 
 rounds only fire for what a grammar can't check (`min(1)`, formats, refinements).
 
 Both live side by side — switching a call from a frontier model to your own box is one word. Anything
-that speaks neither protocol still plugs in with a factory implementing the small `Provider` interface:
+that speaks none of these still plugs in with a factory implementing the small `Provider` interface:
 
 ```ts
 createAI({
-  providers: { gemini: (model) => myGeminiProvider(model) },      // (model: string) => Provider
-  models: { flash: "gemini:gemini-2.5-flash" },
+  providers: { mine: (model) => myProvider(model) },              // (model: string) => Provider
+  models: { house: "mine:house-model-v2" },
 });
 ```
+
+### Google (Gemini on the Agent Platform)
+
+`google` talks to Gemini on Google's Gemini Enterprise Agent Platform (formerly Vertex AI) through Google's
+own SDK. Two credentials, one per
+provider:
+
+```ts
+configure({
+  providers: {
+    google: process.env.GOOGLE_API_KEY!,                    // an Agent Platform API key
+    // or Application Default Credentials (gcloud login, a workload identity, GOOGLE_APPLICATION_CREDENTIALS):
+    // google: { project: "my-project", location: "global" },
+    // or a service account without ADC on the machine:
+    // google: { project: "my-project", googleAuthOptions: { credentials: serviceAccountJson } },
+    "google-eu": { api: "google", project: "my-project", location: "eu" },   // a second region, any name
+  },
+  models: { flash: "google:gemini-3.5-flash", flashEu: "google-eu:gemini-3.5-flash" },
+});
+```
+
+An API key reaches generation only — text, structured output, streaming, tools. Embeddings need the
+`{ project }` form; on a key-only provider `ai.embed()` raises `CoaxUnsupportedError`. `location` defaults
+to `"global"`, where the newest models are served. A key is served from `"global"` only, so a region
+(data residency) needs the `{ project }` form. Naming `apiKey` together with `project`, `googleAuthOptions`
+or a location other than `"global"` is a config error, not a guess about which one you meant. So are the
+OpenAI-wire keys (`baseURL`, `tokenParam`, `strict`, `transcribeModel`, `speakModel`): `google` has no base
+URL, and a gateway that puts an OpenAI-compatible API in front of Gemini is `api: "openai"`.
+
+What to know, briefly:
+
+- **Structured output** uses Gemini's native JSON-schema mode. Its grammar does not enforce everything
+  Zod can say — string lengths, `pattern`/`.regex()`, `.gt()`/`.lt()`, `multipleOf`, intersections
+  (`allOf`), records, `default`, formats other than date/time, boolean literals; for tool arguments also
+  `additionalProperties`, tuples (`prefixItems`), `title`, array lengths and number bounds. coax leaves
+  those out of what it sends and still validates and repairs the result against your schema.
+  `z.literal()` tags go out as enums, so discriminated unions stay grammar-checked.
+- **Thought signatures** round-trip automatically on `ai.run()`: the model's turn rides verbatim on
+  `Message.providerData` (persist it with the transcript), like Anthropic's thinking blocks. A transcript
+  written by another provider (a fallback mid-run, a resumed conversation) continues on Gemini with
+  Google's documented placeholder signature.
+- **`reasoningEffort`** maps to Gemini's `thinkingLevel`. Gemini 3 cannot stop thinking: `"none"` sends
+  `MINIMAL` — the lowest level Gemini allows, not off — and models without it reject the call. Not yet
+  measured: Google documents that `MINIMAL` needs thought signatures in multi-turn conversations, and a
+  repair round or a chat history carries none on text turns — if such calls fail on your model, use `"low"`.
+- **`extraBody`** merges *deep* on Google and uses the REST field names, because every generation knob
+  sits under `generationConfig`: `extraBody: { generationConfig: { temperature: 0.2 } }` sets the
+  temperature without wiping coax's own settings.
+- **Safety blocks** — a blocked prompt or a response stopped by a filter — throw `CoaxRefusalError` with
+  Google's block or finish reason as `category` and the billed `usage`. Never an empty success.
+- **A turn without a usable answer** (`MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`, …) throws an
+  `Error` naming the finish reason, and is billed like a refusal (see
+  [Failed runs still cost tokens](#failed-runs-still-cost-tokens)).
+- **Caching is automatic** on the platform; hits show up as `cacheReadTokens`, and the `cache` /
+  `cacheConversation` flags are no-ops.
+- **Usage** counts thinking tokens as output, as they are billed.
+- **`embed`** sends one request per input — every current Gemini embedding model takes one input at a time.
+  The inputs done before an abort or a failure were billed and are reported. A retry starts the batch over,
+  so it re-bills the inputs it had finished; the result's `usage` counts both attempts.
 
 ### Forwarding the caller's identity
 
@@ -181,11 +243,14 @@ await ai.text({ model: "classify", prompt, reasoningEffort: "low" });  // overri
 Sent on the wire only where set — an endpoint that has never heard of it never sees the field. OpenAI
 gets `reasoning_effort` with the literal value; Anthropic gets `thinking: { type: "enabled", budget_tokens }`
 (budget derived from the effort, capped below `max_tokens`), or no `thinking` field at all for `"none"`.
+Google gets `thinkingLevel` (`LOW`/`MEDIUM`/`HIGH`); `"none"` becomes `MINIMAL`, the lowest level Gemini
+has — not off.
 
 On Anthropic tool runs, thinking blocks round-trip automatically: they ride opaquely on the assistant
 message (`Message.providerData`) and are replayed verbatim — signature intact — on the next turn, so
-`reasoningEffort` works on `ai.run()` too. Persist that field if you store transcripts. One combination
-is impossible by the provider's rules and fails clearly: `toolChoice: "required"` while thinking.
+`reasoningEffort` works on `ai.run()` too. Gemini's thought signatures round-trip the same way. Persist
+that field if you store transcripts. One combination is impossible by Anthropic's rules and fails
+clearly: `toolChoice: "required"` while thinking.
 
 On OpenAI, coax sends the effort literally (`reasoning_effort`); which values a given model accepts is
 the endpoint's business — older reasoning models know `low`–`high` but not `"none"`, non-reasoning
@@ -207,6 +272,8 @@ await ai.text({ model: "local", prompt, extraBody: { chat_template_kwargs: { ena
 Flat merge, same rule as `headers`: call over endpoint over coax's own body. No whitelisting — and it
 **may** override coax's own fields (`max_tokens`, `tools`, …). That is deliberate: an escape hatch that
 can't be overridden by anything isn't one. Overriding a field coax itself relies on is your own risk.
+On Google the merge is deep (objects merge, arrays and values replace) and keys are REST field names —
+`{ generationConfig: { temperature: 0.2 } }` — so one knob doesn't wipe coax's whole `generationConfig`.
 
 ### Cancelling a call
 
@@ -225,7 +292,8 @@ await ai.run({ model: "local", prompt: question, tools, signal: ac.signal });
 
 One honest caveat: coax can only drop the connection to the endpoint. Anthropic, OpenAI, and the usual
 self-hosted runtimes (vLLM, …) stop generating on disconnect; a gateway in between must pass the
-disconnect upstream for the cancellation to reach the model server.
+disconnect upstream for the cancellation to reach the model server. On Google the SDK drops the
+connection, but by its own documentation the service is not cancelled and may still bill the call.
 
 ### Failed runs still cost tokens
 
@@ -233,9 +301,25 @@ A run that dies is booked, not lost: `CoaxToolError` and `CoaxLoopError` carry t
 completed turns plus the transcript up to the failure (`messages`, and `calls` for tool runs),
 `CoaxSchemaError` carries the usage *and* the transcript (including every repair reprompt) of its failed
 attempts, and `CoaxAbortError` carries what was spent before the abort — plus `messages`/`calls` when the
-abort happened inside `ai.run()`, so an aborted run is exactly as resumable as one that hit a limit. The
-`onUsage` hook and any `Budget` see every turn as it happens either way — the error fields close the gap
-for callers who account from results.
+abort happened inside `ai.run()`, so an aborted run is exactly as resumable as one that hit a limit.
+
+A failed call that the vendor still billed is booked the same way, whichever provider raised it: a refusal
+(`CoaxRefusalError` carries its `usage`), a Gemini turn that ended without a usable answer, an embedding
+batch cut short after some inputs. `onUsage` sees each once, `billedUsage(err)` returns what the failed
+call cost, and inside `ai.run()` or `ai.loop()` it counts toward the budget (and toward the run's usage). Such an attempt that coax retried
+is added to the `usage` of the call that finally succeeds (or rides on the error that finally escapes). A provider
+of your own marks such an error with `withBilledUsage(err, usage)`. The `onUsage` hook and any `Budget` see
+every turn as it happens either way — the error fields close the gap for callers who account from results.
+
+```ts
+try {
+  await ai.text({ model: "flash", prompt });
+} catch (err) {
+  const cost = billedUsage(err);       // undefined when the failure cost nothing
+  if (cost) book(cost);
+  throw err;
+}
+```
 
 **Breaking in 0.6:** `ai.run()` now wraps *every* failed model call — not just hitting `maxSteps` or the
 budget — in `CoaxToolError`, with the original error as `.cause` and the same partial state riding along.
@@ -265,7 +349,7 @@ try {
 - **Cancellation** — every call takes an `AbortSignal`; the HTTP request aborts, loops stop between
   turns, and the abort surfaces as `CoaxAbortError` (never retried, never sent to the fallback).
 - **Prompt caching** — `cache: true` caches the system prompt at the provider (Anthropic `cache_control`;
-  a no-op where caching is automatic). Big savings across a fan-out that shares a stable system prompt.
+  a no-op where caching is automatic: OpenAI, Google). Big savings across a fan-out that shares a stable system prompt.
   `cacheConversation: true` marks the conversation-so-far as reusable, so a loop's next turn reads all
   prior turns from cache instead of re-billing the whole transcript.
 - **Streaming** — every surface streams: `ai.stream()` yields text deltas, `ai.streamObject()` partial
@@ -273,7 +357,7 @@ try {
   events (deltas, tool calls, tool results). Model fallback still covers a primary that dies before
   its first token.
 - **Embeddings** — `ai.embed()` returns one vector per input, through the same alias/fallback/usage
-  plumbing as every other call (`embedModel` names the model per endpoint).
+  plumbing as every other call (`embedModel` names the model per endpoint; on Google the model reference does).
 - **Tools** — `ai.run()` hands the model typed tools and runs the whole call/validate/reply loop. With
   an `output` schema the run ends through a validated answer tool: typed data on `result.data`.
 - **Agent loops** — `ai.loop()` drives a typed multi-turn loop with a built-in doom guard + token budget.
@@ -437,8 +521,8 @@ await ai.run({ model: "smart", messages, tools, cacheConversation: true });
 ```
 
 Both flags are provider-neutral: on Anthropic they place `cache_control` breakpoints (the two combine
-to at most two breakpoints per request); on endpoints where prefix caching is automatic (OpenAI)
-they're a no-op.
+to at most two breakpoints per request); on endpoints where prefix caching is automatic (OpenAI,
+Google) they're a no-op — cache hits still show up as `cacheReadTokens`.
 
 ### Streaming
 
@@ -496,10 +580,12 @@ await ai.object({
 });
 ```
 
+PDFs (`kind: "pdf"`) work on Anthropic and Google; OpenAI's chat endpoint takes images only.
+
 ### Embeddings
 
-The RAG building block, on the OpenAI wire (vendor API or your own gateway/vLLM). Embedding models are
-always named separately from chat, so the endpoint declares one:
+The RAG building block, on the OpenAI wire (vendor API or your own gateway/vLLM) and on Google. On the
+OpenAI wire embedding models are named separately from chat, so the endpoint declares one:
 
 ```ts
 configure({
@@ -510,8 +596,17 @@ configure({
 const { embeddings } = await ai.embed({ model: "vectors", input: chunks });  // one vector per chunk, in order
 ```
 
+On Google the model reference names the embedding model itself — no `embedModel` needed (if an endpoint
+sets one anyway, it wins over the reference) — but only the Application Default Credentials form reaches it:
+
+```ts
+configure({ providers: { google: { project: "my-project" } } });
+const { embeddings } = await ai.embed({ model: "google:gemini-embedding-001", input: chunks });
+```
+
 An endpoint without `embedModel`, or a provider without the capability (Anthropic has no embeddings
-API), fails with a message that says exactly that — not a mystery 404.
+API; a Google provider configured with an API key can't reach them), fails with a message that says
+exactly that — not a mystery 404.
 
 ## In a backend-for-frontend
 
@@ -551,7 +646,8 @@ Small and unopinionated. The only vendor-specific surface is the `Provider` inte
 `text` are required, `tools` / `transcribe` / `speak` are optional capabilities an endpoint either serves
 or honestly doesn't. Everything else — schema handling, aggressive parsing, the repair/retry/fallback
 loop, the tool driver, prompt files — is pure and unit-tested against fakes, no network. Zod is a peer
-dependency (you write the schemas); the provider SDKs ship inside coax and load lazily. The high-level
+dependency (you write the schemas); the provider SDKs (Anthropic, OpenAI, Google) ship inside coax and
+load lazily — only when a call first needs one. The high-level
 `createAI` is the recommended entry point; `createClient` (single provider, no config) is available for
 lower-level use.
 

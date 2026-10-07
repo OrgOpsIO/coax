@@ -1,0 +1,31 @@
+{
+  "source": "COMPOSED from the SDK types (@google/genai v2.27.0 src/types.ts: GenerateContentResponse, Candidate, GenerateContentResponseUsageMetadata) and the Agent Platform REST reference https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/rest/v1/GenerateContentResponse (2026-10-06). Values invented; usage arithmetic follows the documented rule totalTokenCount = prompt + candidates + toolUsePrompt + thoughts; cachedContentTokenCount is a subset of promptTokenCount. Includes a thought-summary part (only present with includeThoughts: true) to prove it is NOT returned as text.",
+  "kind": "sdk-generateContent-response",
+  "fixture": {
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": [
+            { "text": "Considering the haiku form…", "thought": true },
+            { "text": "Types guard the gate,\nerrors caught before they run,\nquiet builds at dawn." }
+          ]
+        },
+        "finishReason": "STOP",
+        "index": 0
+      }
+    ],
+    "usageMetadata": {
+      "promptTokenCount": 5000,
+      "cachedContentTokenCount": 4096,
+      "candidatesTokenCount": 21,
+      "thoughtsTokenCount": 64,
+      "totalTokenCount": 5085,
+      "promptTokensDetails": [{ "modality": "TEXT", "tokenCount": 5000 }],
+      "cacheTokensDetails": [{ "modality": "TEXT", "tokenCount": 4096 }],
+      "trafficType": "ON_DEMAND"
+    },
+    "modelVersion": "gemini-3.5-flash",
+    "responseId": "resp-text-1"
+  }
+}

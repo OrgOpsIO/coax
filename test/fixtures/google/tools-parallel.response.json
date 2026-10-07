@@ -1,0 +1,46 @@
+{
+  "source": "Parts VERBATIM from the Agent Platform thought-signatures page, parallel-call example, https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thought-signatures (2026-10-06): 'In cases of parallel function calls in a single response, only the first functionCall part will contain the thought_signature.' ADDED (composed): the `id` on each functionCall, per https://ai.google.dev/gemini-api/docs/generate-content/function-calling 'Gemini 3 now always returns a unique id with every functionCall' (the Agent Platform example shows none — see tools-parallel-noids.history.rest.json for that variant); the candidates/usage envelope from SDK v2.27.0 types. '<SIGNATURE_A>' is the doc's placeholder for an opaque base64 string.",
+  "kind": "sdk-generateContent-response",
+  "fixture": {
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": [
+            {
+              "functionCall": {
+                "id": "call-paris-1",
+                "name": "get_current_temperature",
+                "args": {
+                  "location": "Paris"
+                }
+              },
+              "thoughtSignature": "<SIGNATURE_A>"
+            },
+            {
+              "functionCall": {
+                "id": "call-london-2",
+                "name": "get_current_temperature",
+                "args": {
+                  "location": "London"
+                }
+              }
+            }
+          ]
+        },
+        "finishReason": "STOP",
+        "index": 0
+      }
+    ],
+    "usageMetadata": { "promptTokenCount": 80, "candidatesTokenCount": 24, "thoughtsTokenCount": 112, "totalTokenCount": 216 },
+    "modelVersion": "gemini-3.5-flash"
+  },
+  "expect": {
+    "calls": [
+      { "id": "call-paris-1", "name": "get_current_temperature", "input": { "location": "Paris" } },
+      { "id": "call-london-2", "name": "get_current_temperature", "input": { "location": "London" } }
+    ],
+    "text": "",
+    "note": "providerData must carry enough to replay the model turn with <SIGNATURE_A> on the FIRST functionCall part only, unmerged."
+  }
+}

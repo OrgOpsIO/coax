@@ -1,0 +1,25 @@
+{
+  "source": "COMPOSED. Chunk shape per https://ai.google.dev/gemini-api/docs/generate-content/text-generation (streamGenerateContent?alt=sse; each chunk a full GenerateContentResponse with candidates[0].content.parts[{text}], role model, index 0, usageMetadata, modelVersion, same responseId; no finishReason before the last chunk — Agent Platform: 'finishReason … If empty, the model has not stopped generating'). @google/genai v2.27.0 generateContentStream yields each SSE event unmerged (src/_api_client.ts processStreamResponse). Whether usageMetadata on intermediate chunks is cumulative is UNVERIFIED — this fixture makes the LAST chunk authoritative and gives intermediate chunks partial counts on purpose, so a provider that sums chunks fails the test.",
+  "kind": "sdk-generateContentStream-chunks",
+  "fixture": [
+    {
+      "candidates": [{ "content": { "role": "model", "parts": [{ "text": "Types guard " }] }, "index": 0 }],
+      "usageMetadata": { "promptTokenCount": 9, "candidatesTokenCount": 3, "totalTokenCount": 12 },
+      "modelVersion": "gemini-3.5-flash",
+      "responseId": "resp-stream-1"
+    },
+    {
+      "candidates": [{ "content": { "role": "model", "parts": [{ "text": "the gate," }] }, "index": 0 }],
+      "usageMetadata": { "promptTokenCount": 9, "candidatesTokenCount": 6, "totalTokenCount": 15 },
+      "modelVersion": "gemini-3.5-flash",
+      "responseId": "resp-stream-1"
+    },
+    {
+      "candidates": [{ "content": { "role": "model", "parts": [{ "text": "" }] }, "finishReason": "STOP", "index": 0 }],
+      "usageMetadata": { "promptTokenCount": 9, "candidatesTokenCount": 6, "thoughtsTokenCount": 40, "totalTokenCount": 55 },
+      "modelVersion": "gemini-3.5-flash",
+      "responseId": "resp-stream-1"
+    }
+  ],
+  "expect": { "deltas": ["Types guard ", "the gate,"], "text": "Types guard the gate,", "usage": { "promptTokenCount": 9, "candidatesTokenCount": 6, "thoughtsTokenCount": 40 } }
+}

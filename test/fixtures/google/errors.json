@@ -1,0 +1,36 @@
+{
+  "source": "COMPOSED from @google/genai v2.27.0 src/errors.ts (class ApiError extends Error { status: number }, name 'ApiError') and src/_api_client.ts throwErrorIfNotOK (message = JSON.stringify(errorBody); for a non-JSON body {error:{message:text, code:status, status:statusText}}) and processStreamResponse (an SSE chunk with an `error` object, code 400–599 → ApiError with message `got status: ${status}. ${JSON.stringify(chunkJson)}`). Status/meaning per https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/models/api-errors ; 429 message per https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/deploy/error-code-429 ; missing-signature text per https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures (Agent Platform wording UNVERIFIED). The {error:{code,message,status}} envelope is Google's standard; no Agent Platform page example was fetched [UNVERIFIED]. Abort: the SDK rethrows the fetch error unchanged → DOMException name 'AbortError' (runtime behaviour); coax normalizes via signal.aborted.",
+  "kind": "sdk-thrown-errors",
+  "fixture": {
+    "rateLimited": {
+      "name": "ApiError",
+      "status": 429,
+      "message": "{\"error\":{\"code\":429,\"message\":\"Resource exhausted, please try again later.\",\"status\":\"RESOURCE_EXHAUSTED\"}}"
+    },
+    "unavailable": {
+      "name": "ApiError",
+      "status": 503,
+      "message": "{\"error\":{\"code\":503,\"message\":\"The service is currently unavailable.\",\"status\":\"UNAVAILABLE\"}}"
+    },
+    "missingThoughtSignature": {
+      "name": "ApiError",
+      "status": 400,
+      "message": "{\"error\":{\"code\":400,\"message\":\"Function call `lookup` in the `1` content block is missing a `thought_signature`.\",\"status\":\"INVALID_ARGUMENT\"}}"
+    },
+    "budgetAndLevelTogether": {
+      "name": "ApiError",
+      "status": 400,
+      "message": "{\"error\":{\"code\":400,\"message\":\"<exact text UNVERIFIED — docs only say: using both thinking_level and thinking_budget returns a 400 error>\",\"status\":\"INVALID_ARGUMENT\"}}"
+    },
+    "permissionDenied": {
+      "name": "ApiError",
+      "status": 403,
+      "message": "{\"error\":{\"code\":403,\"message\":\"Permission denied.\",\"status\":\"PERMISSION_DENIED\"}}"
+    },
+    "midStreamErrorChunk": {
+      "sseData": { "error": { "code": 500, "message": "Internal error encountered.", "status": "INTERNAL" } },
+      "thrown": { "name": "ApiError", "status": 500, "message": "got status: 500. {\"error\":{\"code\":500,\"message\":\"Internal error encountered.\",\"status\":\"INTERNAL\"}}" }
+    }
+  },
+  "expect": { "transient": ["rateLimited", "unavailable", "midStreamErrorChunk"], "notTransient": ["missingThoughtSignature", "budgetAndLevelTogether", "permissionDenied"] }
+}

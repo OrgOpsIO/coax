@@ -574,4 +574,31 @@ describe("anthropic refusal stop_reason", () => {
       category: null,
     });
   });
+
+  it("the refusal carries the usage the refused call was billed", async () => {
+    const provider = anthropic({ model: "claude-opus-5", client: refusingClient(REFUSAL) as never });
+    await expect(provider.text({ messages: [{ role: "user", content: "?" }] })).rejects.toMatchObject({
+      usage: { inputTokens: 9, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    });
+  });
+});
+
+describe("cross-vendor transcripts", () => {
+  it("anthropic ignores a Google carrier on an assistant turn — only its own (array) thinking blocks replay", async () => {
+    const { client, sent } = captureAnthropic([{ type: "text", text: "done" }]);
+    const provider = anthropic({ model: "claude-x", client: client as never });
+    const messages: Message[] = [
+      { role: "user", content: "?" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "call-1", name: "lookup", input: {} }],
+        providerData: { provider: "google", parts: [{ functionCall: { id: "call-1", name: "lookup", args: {} }, thoughtSignature: "c2ln" }] },
+      },
+      { role: "user", content: "", toolResults: [{ id: "call-1", name: "lookup", output: "42" }] },
+    ];
+    await provider.tools!({ messages, tools: TOOLS });
+    const assistant = (sent[0]!.body.messages as { content: unknown[] }[])[1]!;
+    expect(assistant.content).toEqual([{ type: "tool_use", id: "call-1", name: "lookup", input: {} }]);
+  });
 });

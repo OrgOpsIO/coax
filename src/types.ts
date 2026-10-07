@@ -16,7 +16,8 @@ export interface ToolCall {
 }
 
 /**
- * How hard the model should think before answering. `"none"` turns thinking off outright — the biggest
+ * How hard the model should think before answering. `"none"` turns thinking off where the model can stop
+ * thinking, and asks for the least thinking it offers where it cannot (Gemini 3: `MINIMAL`) — the biggest
  * lever for cutting latency/cost on calls that don't need it (classification, reformatting). Not every
  * endpoint understands this; it is only sent on the wire where explicitly set (see BaseRequest.reasoningEffort).
  */
@@ -80,17 +81,18 @@ interface BaseRequest {
    * Cancel the call from outside — e.g. the BFF's incoming request died, so the upstream generation
    * should die with it. Passed through to the SDK, which aborts the HTTP request to the endpoint;
    * loops (repair rounds, tool runs) also stop between turns. Aborting surfaces as CoaxAbortError.
+   * Google: client-side only — the SDK drops the connection, the service is not cancelled and may still bill.
    */
   signal?: AbortSignal;
   /** Ask the provider to cache the (stable) system prompt — big savings across a fan-out of calls that
    *  share it. Provider-native where supported (Anthropic cache_control); a no-op where caching is
-   *  automatic (OpenAI). */
+   *  automatic (OpenAI, Google). */
   cacheSystem?: boolean;
   /**
    * Mark the conversation-so-far as reusable, so the NEXT call of a loop reads all prior turns from
    * cache — the textbook win for multi-turn agentic / validate→repair loops that re-send the whole
    * transcript every turn. Provider-native where supported (Anthropic: a cache breakpoint on the last
-   * message); a no-op where caching is automatic (OpenAI).
+   * message); a no-op where caching is automatic (OpenAI, Google).
    */
   cacheConversation?: boolean;
   /**
@@ -112,7 +114,8 @@ interface BaseRequest {
    * MAY override coax's own fields (`max_tokens`, `tools`, …). That is the point: an escape hatch that
    * can't be overridden by anything isn't one. Use it for whatever the next gateway needs that coax
    * doesn't have a first-class field for yet (e.g. `temperature`, `top_p`, `chat_template_kwargs`) —
-   * overriding a field coax itself relies on is your own risk.
+   * overriding a field coax itself relies on is your own risk. Google: merged DEEP (objects merge,
+   * arrays and values replace) with REST field names — e.g. `{ generationConfig: { temperature: 0.2 } }`.
    */
   extraBody?: Record<string, unknown>;
 }
@@ -163,7 +166,7 @@ export interface EmbedRequest {
   input: string | string[];
   headers?: Record<string, string>;
   signal?: AbortSignal;
-  /** Merged flat into the wire body, last — same contract as `BaseRequest.extraBody`. */
+  /** Merged into the wire body, last (flat; deep on Google) — same contract as `BaseRequest.extraBody`. */
   extraBody?: Record<string, unknown>;
 }
 
@@ -272,25 +275,53 @@ export interface Provider {
 }
 
 /**
- * Raised when the endpoint's safety layer declined the request (Anthropic `stop_reason: "refusal"`,
- * an HTTP 200 whose content is empty or a discarded partial). Without this, a refusal would surface as
- * a SUCCESSFUL call with empty text — booked as if the model had answered. Non-transient by design:
- * `withRetry` sees no status/code and rethrows immediately; the ai-layer model fallback still applies,
- * which is the right rescue for a false-positive classifier hit.
+ * Raised when the endpoint's safety layer declined the request (Anthropic `stop_reason: "refusal"`;
+ * Google a blocked prompt or a candidate stopped by a filter — HTTP 200s whose content is empty or a
+ * discarded partial). Without this, a refusal would surface as a SUCCESSFUL call with empty text —
+ * booked as if the model had answered. Non-transient by design: `withRetry` sees no status/code and
+ * rethrows immediately; the ai-layer model fallback still applies, which is the right rescue for a
+ * false-positive classifier hit.
  */
 export class CoaxRefusalError extends Error {
+  /** What the refused call was billed — a blocked prompt still costs its input tokens. Reported through `onUsage`. */
+  readonly usage: Usage;
   constructor(
     readonly model: string,
-    /** Anthropic `stop_details.category` (e.g. "cyber", "bio") — null when the endpoint gave none. */
+    /** Anthropic `stop_details.category` (e.g. "cyber", "bio"); Google `blockReason` / `finishReason` (e.g. "SAFETY"). Null when none. */
     readonly category: string | null = null,
     readonly explanation: string | null = null,
+    usage: Usage = emptyUsage(),
   ) {
-    super(
-      `coax: ${model} refused the request (stop_reason "refusal"${category ? `, category "${category}"` : ""})` +
-        (explanation ? ` — ${explanation}` : ""),
-    );
+    super(`coax: ${model} refused the request${category ? ` (category "${category}")` : ""}` + (explanation ? ` — ${explanation}` : ""));
     this.name = "CoaxRefusalError";
+    this.usage = usage;
+    withBilledUsage(this, usage);
   }
+}
+
+// Symbol.for, not Symbol: two copies of coax in one process (ESM + CJS builds) must read each other's marks.
+const BILLED = Symbol.for("coax.billedUsage");
+
+/**
+ * What a FAILED call was still billed for, or undefined when its failure cost nothing (or the provider
+ * cannot tell). A refused prompt, a turn that ended without a usable answer, an embed batch that died
+ * after some inputs: each cost tokens, and coax reports them through `onUsage` once and counts them in
+ * `ai.run()`'s usage and budget, whatever the vendor. Only that failed call's own tokens — what earlier
+ * completed calls of the same loop cost was reported as each one completed. `CoaxRefusalError` always
+ * carries it (equal to its `usage`).
+ */
+export function billedUsage(err: unknown): Usage | undefined {
+  return typeof err === "object" && err !== null ? (err as { [BILLED]?: Usage })[BILLED] : undefined;
+}
+
+/**
+ * Marks `err` as a failure that was still billed `usage`, and returns it — for a provider that throws
+ * after the vendor already charged (see `billedUsage`). Keeps the error's class, message and fields, so
+ * `withRetry` still sees its status. Non-enumerable: invisible to JSON and to deep equality.
+ */
+export function withBilledUsage<E extends object>(err: E, usage: Usage): E {
+  Object.defineProperty(err, BILLED, { value: usage, configurable: true, writable: true, enumerable: false });
+  return err;
 }
 
 export const emptyUsage = (): Usage => ({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
