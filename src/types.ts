@@ -72,7 +72,8 @@ export interface Usage {
   cacheReadTokens: number;
   /** Tokens written to the prompt cache (0 if unsupported). */
   cacheWriteTokens: number;
-  /** Characters billed for speech synthesis (ElevenLabs: the `character-cost` response header). Absent
+  /** What speech synthesis was billed in the vendor's character unit — on ElevenLabs its credit cost (the
+   *  `character-cost` response header), which depends on model and plan, not the input's length. Absent
    *  when the vendor reported none. Not counted by a `Budget`, which counts tokens. */
   characters?: number;
   /** Seconds of audio billed for transcription (ElevenLabs `audio_duration_secs`, OpenAI whisper

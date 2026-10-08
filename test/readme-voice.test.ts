@@ -270,9 +270,9 @@ describe("README: ElevenLabs and voice configuration", () => {
     expect(flat).not.toContain("The abort books what was already spoken");
   });
 
-  it("says usage.characters is ElevenLabs' character-cost, not the input's length (human, O15 live run)", () => {
+  it("says usage.characters is ElevenLabs' credit cost (character-cost), not the input's length (human, O15 live run, O21)", () => {
     expect(section("### Voice")).toContain(
-      "`usage.characters` is ElevenLabs' `character-cost`, not the length of `input`, and it can be far below it: in a live run, 10 for a 44-character sentence on `eleven_flash_v2_5`, 1 on `eleven_v4`.",
+      "`usage.characters` is ElevenLabs' credit cost (its `character-cost` header), which depends on the model and your plan — not the length of `input`, and it can be far below it: in a live run, 10 for a 44-character sentence on `eleven_flash_v2_5`, 1 on `eleven_v4`.",
     );
   });
 
