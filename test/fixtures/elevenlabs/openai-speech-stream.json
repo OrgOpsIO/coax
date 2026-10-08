@@ -1,0 +1,31 @@
+{
+  "source": "Collected by a research helper of the surveyor, 2026-10-08; full record with line references in logs/stage-03/survey/openai/openai-facts.md (section A) and spec-excerpt-audio-speech.json. SPEC = https://raw.githubusercontent.com/openai/openai-openapi/HEAD/openapi.json (commit 234829e, 2026-10-07, info.version 2.3.0); SDK6 = node_modules/openai 6.46.0 (the version coax installs); DOC-TTS = https://developers.openai.com/api/docs/guides/text-to-speech.md. Event payloads VERBATIM from SPEC x-oaiMeta examples. Nothing executed against OpenAI.",
+  "kind": "rest-request + streamed responses (raw chunked audio, or SSE)",
+  "fixture": {
+    "sdkCall": "const res = await client.audio.speech.create({ model, input, voice, response_format, speed?, instructions?, stream_format? }, { signal, headers }); // APIPromise<Response> - the raw fetch Response, body unread (SDK6 resources/audio/speech.ts:29-37, internal/parse.ts:52-54)",
+    "rawAudio": {
+      "request": { "model": "gpt-4o-mini-tts", "input": "Hello there.", "voice": "alloy", "response_format": "mp3" },
+      "response": { "status": 200, "headers": { "transfer-encoding": "chunked", "content-type": "audio/mpeg" }, "body": "res.body: ReadableStream<Uint8Array> of the encoded file" },
+      "streams": "SPEC declares 'Transfer-Encoding: chunked' on the endpoint's 200 (no per-model rule); DOC-TTS: 'realtime audio streaming using chunk transfer encoding'. GUESS that tts-1/tts-1-hd send progressively (only the endpoint-level claim exists).",
+      "usage": "none - the binary response carries no usage field or header (SPEC)"
+    },
+    "sse": {
+      "request": { "model": "gpt-4o-mini-tts", "input": "The quick brown fox jumped over the lazy dog.", "voice": "alloy", "stream_format": "sse" },
+      "streamFormat": "'sse' | 'audio', default 'audio' (SPEC); \"`sse` is not supported for `tts-1` or `tts-1-hd`\" (SDK6 resources/audio/speech.ts:94-98)",
+      "events": [
+        { "type": "speech.audio.delta", "audio": "base64-encoded-audio-data" },
+        { "type": "speech.audio.done", "usage": { "input_tokens": 14, "output_tokens": 101, "total_tokens": 115 } }
+      ],
+      "sdkSupport": "NONE: no SSE types or parser for speech in SDK 6.46.0 or 7.30.0 (grep speech.audio.delta: no match); the body must be parsed by the caller. GUESS: framing (event: lines, end marker) beyond the JSON payload."
+    },
+    "models": ["tts-1", "tts-1-hd", "gpt-4o-mini-tts", "gpt-4o-mini-tts-2025-12-15"],
+    "formats": "response_format mp3 (default) | opus | aac | flac | wav | pcm; DOC-TTS: 'For the fastest response times, we recommend using wav or pcm'; pcm = 'raw samples in 24kHz (16-bit signed, low-endian), without the header'",
+    "errors": "Non-2xx before any audio -> the SDK's APIError with status (SDK6 client.ts:856-927); SPEC lists 400/401/403/429/500/503. No in-band error event exists in the SSE union.",
+    "abortAndTimeout": "options.signal stays wired while the body streams, so an abort ends the body read (SDK6 client.ts:1000, 1009, 1129, 1183); the SDK timeout stops applying once headers arrive (client.ts:1002, 1024) - GUESS: the exact error class at the reader when aborted mid-body (undici: DOMException AbortError, as measured for ElevenLabs)."
+  },
+  "expect": {
+    "served": "yes - streamed speech on the OpenAI wire is res.body instead of res.arrayBuffer(); coax's openai provider today does `new Uint8Array(await resp.arrayBuffer())` (src/providers/openai.ts speak).",
+    "usage": "Raw audio: no usage (as speak today: emptyUsage). SSE: tokens on speech.audio.done for gpt-4o-mini-tts only - the architect decides whether that is worth an SSE parser; tts-1 is billed per character but reports nothing.",
+    "gateways": "An OpenAI-compatible gateway may or may not stream its /audio/speech body - same code path, honest either way (the bytes arrive when they arrive)."
+  }
+}

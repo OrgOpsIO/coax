@@ -86,4 +86,36 @@ describe("the public declarations", () => {
     );
     expect(diagnostics).toEqual([]);
   }, 60_000);
+
+  it("compile a consumer of streamed speech and realtime tokens, with a provider of its own (stage 3)", () => {
+    const diagnostics = compileConsumer(
+      decls,
+      [
+        `import { createAI, emptyUsage, type Provider, type SpeakStream, type SpeakStreamResult, type SpeakStreamResponse, type TranscribeTokenCall, type TranscribeTokenRequest, type TranscribeTokenResponse } from "./.coax-decl/src/index";`,
+        `const own: Provider = {`,
+        `  name: "own", model: "m",`,
+        `  structured: async () => ({ raw: {}, text: "{}", usage: emptyUsage(), model: "m" }),`,
+        `  text: async () => ({ raw: "", text: "", usage: emptyUsage(), model: "m" }),`,
+        `  speakStream: async (): Promise<SpeakStreamResponse> => ({ mediaType: "audio/mpeg", model: "m", audio: (async function* () { yield new Uint8Array([1]); return emptyUsage(); })() }),`,
+        `  transcribeToken: async (_req: TranscribeTokenRequest): Promise<TranscribeTokenResponse> => ({ token: "t", url: "wss://x", usage: emptyUsage(), model: "m" }),`,
+        `};`,
+        `const ai = createAI({ providers: { own: () => own, elevenlabs: "k" } });`,
+        `export async function speak(write: (b: Uint8Array) => void): Promise<SpeakStreamResult> {`,
+        `  const s: SpeakStream = await ai.speakStream({ model: "own:m", input: "Hi.", format: "mp3" });`,
+        `  const type: string = s.mediaType;`,
+        `  for await (const chunk of s.audio) write(chunk);`,
+        `  void type;`,
+        `  return s.result;`,
+        `}`,
+        // O19: a provider of its own declares a bill known before the audio, so a `break` books it.
+        `export const billedAtHeader: SpeakStreamResponse = { mediaType: "audio/mpeg", model: "m", billed: { ...emptyUsage(), characters: 12 }, audio: (async function* () { return emptyUsage(); })() };`,
+        `export async function token(): Promise<string> {`,
+        `  const call: TranscribeTokenCall = { model: "elevenlabs:scribe_v2_realtime", purpose: "listen" };`,
+        `  const t: TranscribeTokenResponse = await ai.transcribeToken(call);`,
+        `  return t.token + t.url + t.model + t.usage.inputTokens;`,
+        `}`,
+      ].join("\n"),
+    );
+    expect(diagnostics).toEqual([]);
+  }, 60_000);
 });

@@ -6,12 +6,15 @@ import {
   type ProviderResponse,
   type SpeakRequest,
   type SpeakResponse,
+  type SpeakStreamResponse,
   type TranscribeRequest,
   type TranscribeResponse,
+  type TranscribeTokenRequest,
+  type TranscribeTokenResponse,
   type TranscriptWord,
   type Usage,
 } from "../types";
-import { CoaxUnsupportedError } from "../client";
+import { CoaxAbortError, CoaxUnsupportedError } from "../client";
 import { EXTENSIONS } from "./audio";
 
 export interface ElevenLabsOptions {
@@ -36,23 +39,26 @@ export interface ElevenLabsOptions {
  * type-checks its libraries — ElevenLabs user or not. A real `ElevenLabsClient` fits as it is.
  */
 interface ElevenLabsClientLike {
-  textToSpeech: { convert(voiceId: string, request: unknown, requestOptions?: unknown): unknown };
+  // `stream` and `tokens` are optional so a hand-made client that compiled before they existed still compiles; a
+  // call that needs one it lacks fails with a plain Error naming it, not a TypeError from deep inside.
+  textToSpeech: { convert(voiceId: string, request: unknown, requestOptions?: unknown): unknown; stream?(voiceId: string, request: unknown, requestOptions?: unknown): unknown };
   speechToText: { convert(request: unknown, requestOptions?: unknown): unknown };
+  tokens?: { singleUse: { create(tokenType: string, requestOptions?: unknown): unknown } };
 }
 
 type RequestOptions ={ headers?: Record<string, string>; abortSignal?: AbortSignal };
 type RawWord = { text: string; start?: number | null; end?: number | null; type: string; speakerId?: string | null };
+type SpeechCall = (
+  voiceId: string,
+  body: Record<string, unknown>,
+  options?: RequestOptions,
+) => { withRawResponse(): Promise<{ data: ReadableStream<Uint8Array>; rawResponse: { headers: Headers } }> };
 type AnyClient = {
-  textToSpeech: {
-    convert(
-      voiceId: string,
-      body: Record<string, unknown>,
-      options?: RequestOptions,
-    ): { withRawResponse(): Promise<{ data: ReadableStream<Uint8Array>; rawResponse: { headers: Headers } }> };
-  };
+  textToSpeech: { convert: SpeechCall; stream?: SpeechCall };
   speechToText: {
     convert(body: Record<string, unknown>, options?: RequestOptions): Promise<{ text?: unknown; words?: RawWord[]; audioDurationSecs?: number }>;
   };
+  tokens?: { singleUse: { create(tokenType: "realtime_scribe", options?: RequestOptions): Promise<{ token?: unknown }> } };
 };
 
 /**
@@ -96,6 +102,23 @@ function liftNetworkCode(err: unknown): unknown {
   return err;
 }
 
+/**
+ * A speech body that failed after the header: coax books what `character-cost` said, as for a completed speech
+ * (whether ElevenLabs bills a cut-off speech is not documented). An abort becomes the provider's own
+ * CoaxAbortError, so the reported characters survive `abortedBy()`; anything else (undici's
+ * "terminated" on a dropped connection) goes through as it is — not lifted, so never retried into a second bill.
+ */
+function afterHeader(err: unknown, signal: AbortSignal | undefined, usage: Usage, billed: boolean): unknown {
+  const failure = signal?.aborted && !(err instanceof CoaxAbortError) ? new CoaxAbortError(usage, err) : err;
+  if (billed && typeof failure === "object" && failure !== null) withBilledUsage(failure, usage);
+  return failure;
+}
+
+// The SDK's own derivation of the realtime endpoint from the REST host (2.71.0 wrapper/realtime/scribe.js l.78–86).
+const realtimeUrl = (baseURL?: string): string =>
+  (baseURL ?? "https://api.elevenlabs.io").replace(/\/+$/, "").replace(/^https?:\/\//i, (m) => (m.toLowerCase() === "https://" ? "wss://" : "ws://")) +
+  "/v1/speech-to-text/realtime";
+
 /** Spoken words only (no `spacing` / `audio_event` entries), with timing and the speaker label if any. */
 function toWords(raw: RawWord[]): TranscriptWord[] {
   const out: TranscriptWord[] = [];
@@ -108,8 +131,9 @@ function toWords(raw: RawWord[]): TranscriptWord[] {
 }
 
 /**
- * ElevenLabs — voice only: `speak` (text-to-speech) and `transcribe` (Scribe, batch). It serves no text
- * or structured output, so those reject with CoaxUnsupportedError, as a missing optional capability does.
+ * ElevenLabs — voice only: `speak` and `speakStream` (text-to-speech), `transcribe` (Scribe, batch) and
+ * `transcribeToken` (Scribe realtime, for the browser). It serves no text or structured output, so those reject
+ * with CoaxUnsupportedError, as a missing optional capability does.
  */
 export function elevenlabs(opts: ElevenLabsOptions): Provider {
   // The SDK reads ELEVENLABS_API_KEY when no key is passed — a key coax was not configured with must never be used.
@@ -133,6 +157,28 @@ export function elevenlabs(opts: ElevenLabsOptions): Provider {
     return Object.keys(out).length ? out : undefined;
   };
 
+  // Every check runs before the SDK is loaded: the vendor is never billed for a call coax won't honour.
+  function speech(req: SpeakRequest): { voice: string; variant: { outputFormat: string; mediaType: string }; body: Record<string, unknown> } {
+    const voice = req.voice || opts.voice;
+    if (!voice) throw new Error("coax: elevenlabs needs a voice id — pass `voice` to ai.speak() or set `voice` on the endpoint");
+    if (req.instructions) throw new CoaxUnsupportedError("delivery instructions (`instructions`)", "elevenlabs");
+    const format = req.format ?? "mp3";
+    const variant = FORMATS[format];
+    if (!variant) throw new CoaxUnsupportedError(`${format} output`, "elevenlabs");
+    // The documented range; what the API does outside it (error or clamp) is not — a clamp would change the call.
+    if (req.speed != null && !(req.speed >= 0.7 && req.speed <= 1.2)) {
+      throw new Error(`coax: elevenlabs speed must be between 0.7 and 1.2 (got ${req.speed})`);
+    }
+    const body = {
+      text: req.input,
+      modelId: opts.model,
+      outputFormat: variant.outputFormat,
+      ...(req.language ? { languageCode: req.language } : {}),
+      ...(req.speed != null ? { voiceSettings: { speed: req.speed } } : {}),
+    };
+    return { voice, variant, body };
+  }
+
   return {
     name: "elevenlabs",
     model: opts.model,
@@ -146,44 +192,77 @@ export function elevenlabs(opts: ElevenLabsOptions): Provider {
     },
 
     async speak(req: SpeakRequest): Promise<SpeakResponse> {
-      // Every check runs before the SDK is loaded: the vendor is never billed for a call coax won't honour.
-      const voice = req.voice || opts.voice;
-      if (!voice) throw new Error("coax: elevenlabs needs a voice id — pass `voice` to ai.speak() or set `voice` on the endpoint");
-      if (req.instructions) throw new CoaxUnsupportedError("delivery instructions (`instructions`)", "elevenlabs");
-      const format = req.format ?? "mp3";
-      const variant = FORMATS[format];
-      if (!variant) throw new CoaxUnsupportedError(`${format} output`, "elevenlabs");
-      // The documented range; what the API does outside it (error or clamp) is not — a clamp would change the call.
-      if (req.speed != null && !(req.speed >= 0.7 && req.speed <= 1.2)) {
-        throw new Error(`coax: elevenlabs speed must be between 0.7 and 1.2 (got ${req.speed})`);
-      }
-
+      const { voice, variant, body } = speech(req);
       const c = await getClient();
       const { data, rawResponse } = await c.textToSpeech
-        .convert(
-          voice,
-          {
-            text: req.input,
-            modelId: opts.model,
-            outputFormat: variant.outputFormat,
-            ...(req.language ? { languageCode: req.language } : {}),
-            ...(req.speed != null ? { voiceSettings: { speed: req.speed } } : {}),
-          },
-          requestOptions(req.headers, req.signal),
-        )
+        .convert(voice, body, requestOptions(req.headers, req.signal))
         .withRawResponse()
         .catch((err: unknown) => {
           throw liftNetworkCode(err);
         });
-      const audio = new Uint8Array(await new Response(data).arrayBuffer());
+      // The SDK resolves at the header (measured), so the bill is known before the body is read — and survives a
+      // body that breaks or is aborted after it.
       const billed = characters(rawResponse.headers);
       const usage: Usage = { ...emptyUsage(), ...(billed != null ? { characters: billed } : {}) };
+      let audio: Uint8Array;
+      try {
+        audio = new Uint8Array(await new Response(data).arrayBuffer());
+      } catch (err) {
+        throw afterHeader(err, req.signal, usage, billed != null);
+      }
       // Never an empty success: no audio is a failure, whatever the status said — and it still cost what the header says.
       if (audio.byteLength === 0) {
         const err = new Error("coax: elevenlabs returned no audio");
         throw billed != null ? withBilledUsage(err, usage) : err;
       }
       return { audio, mediaType: variant.mediaType, usage, model: opts.model };
+    },
+
+    async speakStream(req: SpeakRequest): Promise<SpeakStreamResponse> {
+      const { voice, variant, body } = speech(req);
+      const c = await getClient();
+      if (!c.textToSpeech.stream) throw new Error("coax: the ElevenLabs client passed as `client` has no textToSpeech.stream");
+      const { data, rawResponse } = await c.textToSpeech
+        .stream(voice, body, requestOptions(req.headers, req.signal))
+        .withRawResponse()
+        .catch((err: unknown) => {
+          throw liftNetworkCode(err);
+        });
+      // Whether /stream sends character-cost is not documented: when it does, it is the bill — known before the audio.
+      const billed = characters(rawResponse.headers);
+      const usage: Usage = { ...emptyUsage(), ...(billed != null ? { characters: billed } : {}) };
+      async function* audio(): AsyncGenerator<Uint8Array, Usage, void> {
+        let bytes = 0;
+        try {
+          // A return() while suspended at `yield` leaves this loop, which cancels the body and closes the connection.
+          for await (const chunk of data) {
+            if (!chunk.byteLength) continue;
+            bytes += chunk.byteLength;
+            yield chunk;
+          }
+        } catch (err) {
+          throw afterHeader(err, req.signal, usage, billed != null);
+        }
+        if (bytes === 0) {
+          const err = new Error("coax: elevenlabs returned no audio");
+          throw billed != null ? withBilledUsage(err, usage) : err;
+        }
+        return usage;
+      }
+      return { mediaType: variant.mediaType, model: opts.model, audio: audio(), ...(billed != null ? { billed: usage } : {}) };
+    },
+
+    async transcribeToken(req: TranscribeTokenRequest): Promise<TranscribeTokenResponse> {
+      const c = await getClient();
+      if (!c.tokens?.singleUse?.create) throw new Error("coax: the ElevenLabs client passed as `client` has no tokens.singleUse.create");
+      // The one token type the row asks for; batch_scribe / tts_websocket tokens are not coax's to hand out.
+      const res = await c.tokens.singleUse.create("realtime_scribe", requestOptions(req.headers, req.signal)).catch((err: unknown) => {
+        throw liftNetworkCode(err);
+      });
+      if (typeof res?.token !== "string" || !res.token) throw new Error("coax: elevenlabs returned no token");
+      // Issuing has no documented cost and coax never sees the session it opens: zero units, reported once, so an
+      // app can still count the tokens it handed out.
+      return { token: res.token, url: realtimeUrl(opts.baseURL), usage: emptyUsage(), model: opts.model };
     },
 
     async transcribe(req: TranscribeRequest): Promise<TranscribeResponse> {

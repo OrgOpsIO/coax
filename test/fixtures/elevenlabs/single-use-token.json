@@ -1,0 +1,30 @@
+{
+  "source": "Endpoint, token types, 15-minute expiry and 'consumed on use' VERBATIM from https://elevenlabs.io/docs/api-reference/tokens/create and https://api.elevenlabs.io/openapi.json (paths./v1/single-use-token/{token_type}.post, components.schemas.SingleUseTokenType), accessed 2026-10-08. Wire, parsed result and errors MEASURED with the real SDK 2.71.0 + Node 22.22.3 real fetch against a local server, fake key (logs/stage-03/survey/probe-stream.mjs, case single-use-token). SDK: api/resources/tokens/resources/singleUse/client/Client.d.ts l.26. The token value is the docs' own example.",
+  "kind": "sdk-call + rest request/response + errors",
+  "fixture": {
+    "sdkCall": "client.tokens.singleUse.create(\"realtime_scribe\", { headers, abortSignal, maxRetries: 0 }).withRawResponse()",
+    "wire": {
+      "method": "POST",
+      "path": "/v1/single-use-token/realtime_scribe",
+      "headers": { "xi-api-key": "<key>", "accept": "*/*" },
+      "body": null
+    },
+    "tokenTypes": ["realtime_scribe", "batch_scribe", "tts_websocket"],
+    "requestParameters": "NONE besides the path segment: no TTL, no model, no scope, no session config (openapi: only token_type in path and the xi-api-key header).",
+    "response200": { "token": "sutkn_1234567890" },
+    "responseFieldDoc": "token (string, required) - A time bound single use token that expires after 15 minutes. Will be consumed on use.",
+    "responseHeaders": "None documented. No usage / cost header is documented for this endpoint.",
+    "errors": {
+      "unknownTypeInSdk": { "class": "JsonError", "message": "Expected enum. Received \"not_a_type\".", "isElevenLabsError": false, "requestsSent": 0 },
+      "401": { "class": "ElevenLabsError", "statusCode": 401, "body": { "detail": { "type": "authentication_error", "code": "invalid_api_key", "message": "Invalid API key" } } },
+      "422": { "class": "UnprocessableEntityError", "statusCode": 422, "body": { "detail": [{ "loc": ["path", "token_type"], "msg": "Input should be 'realtime_scribe', 'batch_scribe' or 'tts_websocket'", "type": "enum" }] } }
+    },
+    "hosts": "Served on every host incl. https://api.us.elevenlabs.io and the residency hosts (eu/in/sg) - the server list on the token page. GUESS: a token issued on a residency host only works against that host's wss endpoint (each residency host is a separate account with its own key per stage-02 facts §2; not documented for tokens)."
+  },
+  "expect": {
+    "result": "What the browser needs: the token string; it must pick the model and session options itself (the token carries none). The browser connects to wss://<host>/v1/speech-to-text/realtime?model_id=scribe_v2_realtime&token=<token>.",
+    "expiry": "Fixed by the vendor: 15 minutes from issue, single use. coax cannot shorten or lengthen it; it can state it (e.g. an expiresAt computed at issue time - a coax computation, the API returns no timestamp).",
+    "usage": "The token call itself: no cost documented (GUESS: free - pricing lists audio duration only). The realtime session it opens is billed by audio duration (stage-02 facts §8: Realtime $0.39/h) but runs browser <-> vendor; coax never sees it and the realtime protocol carries no usage/duration event (realtime-scribe.messages.json).",
+    "retry": "A 429/5xx on token issue is retried by coax like any call (isTransient on statusCode). Issuing twice is harmless (an unused token expires)."
+  }
+}
