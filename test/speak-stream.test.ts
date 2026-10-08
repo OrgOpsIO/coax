@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAI, type AI } from "../src/ai";
 import { CoaxAbortError, CoaxUnsupportedError } from "../src/client";
@@ -388,5 +389,201 @@ describe("streamed speech and tokens: gaps closed by the measurer (stage 3, fake
     const { ai, usages } = aiWith({ ears: provider("ears", { transcribeToken: async () => ({ token: "t", url: "wss://x", usage, model: "m" }) }) });
     expect((await ai.transcribeToken({ model: "ears:m" })).usage).toStrictEqual(usage);
     expect(usages.map((u) => u.usage)).toStrictEqual([usage]);
+  });
+});
+
+/** "pending" when `p` has not settled within `ms` — so a promise that hangs fails the test instead of timing it out. */
+function settled<T>(p: Promise<T>, ms = 500): Promise<{ ok: T } | { err: unknown } | "pending"> {
+  return Promise.race([p.then((ok) => ({ ok }), (err: unknown) => ({ err })), new Promise<"pending">((r) => setTimeout(() => r("pending"), ms))]);
+}
+
+// Fixer (stage 3), review R3.1: an abort while nobody pulls the speech (opened ahead, never iterated) must still
+// book what the vendor billed and settle `result`, as an abort while iterating does.
+describe("streamed speech aborted while nobody iterates it (review R3.1, fake providers)", () => {
+  const billed = { ...zeros, characters: 12 };
+  /** Shaped like ElevenLabs: billed at the header; after the first chunk the body fails on abort with the provider's own marked error. */
+  function billedAtHeader() {
+    const own = withBilledUsage(new CoaxAbortError(billed), billed);
+    let pulls = 0;
+    const s = streaming(async function* (req) {
+      yield A;
+      pulls++;
+      if (!req.signal!.aborted) await new Promise((r) => req.signal!.addEventListener("abort", r, { once: true }));
+      throw own;
+    });
+    return { ...s, own, pulls: () => pulls };
+  }
+
+  it("an abort before the first iteration reports the billed characters once and rejects result; a later iteration throws the same error", async () => {
+    const p = billedAtHeader();
+    const { ai, usages } = aiWith({ voice: provider("voice", { speakStream: p.speakStream }) });
+    const ac = new AbortController();
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hello there.", signal: ac.signal });
+    ac.abort();
+    const out = await settled(opened.result);
+    expect(out).toStrictEqual({ err: p.own });
+    expect(usages.map((u) => u.usage)).toStrictEqual([billed]);
+    expect(usages[0]!.meta.purpose).toBe("speakStream");
+    // Iterating afterwards sees what the source produced — the first chunk, then the same error — and books nothing more.
+    const got: Uint8Array[] = [];
+    const err = await (async () => {
+      for await (const c of opened.audio) got.push(c);
+    })().catch((e: unknown) => e);
+    expect(got).toStrictEqual([A]);
+    expect(err).toBe(p.own);
+    expect(usages).toHaveLength(1);
+    expect(p.pulls()).toBe(1);
+  });
+
+  it("an abort while the consumer holds a chunk and never pulls again books the speech and rejects result", async () => {
+    const p = billedAtHeader();
+    const { ai, usages } = aiWith({ voice: provider("voice", { speakStream: p.speakStream }) });
+    const ac = new AbortController();
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hello there.", signal: ac.signal });
+    const it = opened.audio[Symbol.asyncIterator]();
+    expect(await it.next()).toStrictEqual({ done: false, value: A });
+    ac.abort();
+    expect(await settled(opened.result)).toStrictEqual({ err: p.own });
+    expect(usages.map((u) => u.usage)).toStrictEqual([billed]);
+    await expect(it.next()).rejects.toBe(p.own);
+    expect(usages).toHaveLength(1);
+  });
+
+  it("an abort that lands while the consumer's own pull is in flight is booked once, through that pull", async () => {
+    const p = billedAtHeader();
+    const { ai, usages } = aiWith({ voice: provider("voice", { speakStream: p.speakStream }) });
+    const ac = new AbortController();
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hello there.", signal: ac.signal });
+    const it = opened.audio[Symbol.asyncIterator]();
+    await it.next();
+    const pending = it.next();
+    ac.abort();
+    await expect(pending).rejects.toBe(p.own);
+    await expect(opened.result).rejects.toBe(p.own);
+    expect(usages.map((u) => u.usage)).toStrictEqual([billed]);
+    expect(p.pulls()).toBe(1);
+  });
+
+  it("an abort during the consumer's pull that still brings a chunk, then no further pull: coax drains the rest and books it once", async () => {
+    const p = billedAtHeader();
+    const s = streaming(async function* (req) {
+      yield A;
+      await new Promise((r) => setTimeout(r, 5));
+      yield B; // already buffered: arrives despite the abort
+      if (!req.signal!.aborted) await new Promise((r) => req.signal!.addEventListener("abort", r, { once: true }));
+      throw p.own;
+    });
+    const { ai, usages } = aiWith({ voice: provider("voice", { speakStream: s.speakStream }) });
+    const ac = new AbortController();
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hello there.", signal: ac.signal });
+    const it = opened.audio[Symbol.asyncIterator]();
+    await it.next();
+    const pending = it.next();
+    ac.abort();
+    expect(await pending).toStrictEqual({ done: false, value: B });
+    expect(await settled(opened.result)).toStrictEqual({ err: p.own });
+    expect(usages.map((u) => u.usage)).toStrictEqual([billed]);
+  });
+
+  it("an empty degraded speech aborted before iteration still resolves with speak's usage, never undefined", async () => {
+    const usage = { ...zeros, characters: 2 };
+    const { ai, usages } = aiWith({ voice: provider("voice", { speak: async () => ({ audio: new Uint8Array(0), mediaType: "audio/mpeg", usage, model: "m" }) }) });
+    const ac = new AbortController();
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hi.", signal: ac.signal });
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 0)); // whatever the abort set off has run before anyone iterates
+    expect(await drain(opened.audio)).toStrictEqual([]);
+    expect((await opened.result).usage).toStrictEqual(usage);
+    expect(usages).toHaveLength(1);
+  });
+
+  it("a source that ignores the abort and ends: coax drains it, books it once, result resolves, a later iteration replays every chunk", async () => {
+    const usage = { ...zeros, characters: 7 };
+    const s = streaming(async function* () {
+      yield A;
+      yield B;
+      yield C;
+      return usage;
+    });
+    const { ai, usages } = aiWith({ voice: provider("voice", { speakStream: s.speakStream }) });
+    const ac = new AbortController();
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hi.", signal: ac.signal });
+    ac.abort();
+    expect(await settled(opened.result)).toStrictEqual({ ok: { mediaType: "audio/mpeg", usage, model: "m" } });
+    expect(usages.map((u) => u.usage)).toStrictEqual([usage]);
+    expect(await drain(opened.audio)).toStrictEqual([A, B, C]);
+    expect(usages).toHaveLength(1);
+  });
+
+  it("an abort after the speech was drained changes nothing: result keeps its usage (never undefined), onUsage once, the listener is gone", async () => {
+    const usage = { ...zeros, characters: 3 };
+    let pullsAfterEnd = 0;
+    const gen = async function* (): Gen {
+      yield A;
+      return usage;
+    };
+    const s = streaming(() => {
+      const g = gen();
+      const next = g.next.bind(g);
+      let ended = false;
+      g.next = async () => {
+        if (ended) pullsAfterEnd++;
+        const r = await next();
+        if (r.done) ended = true;
+        return r;
+      };
+      return g;
+    });
+    const { ai, usages } = aiWith({ voice: provider("voice", { speakStream: s.speakStream }) });
+    const ac = new AbortController();
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hi.", signal: ac.signal });
+    expect(getEventListeners(ac.signal, "abort").length).toBe(1);
+    expect(await drain(opened.audio)).toStrictEqual([A]);
+    expect(getEventListeners(ac.signal, "abort").length).toBe(0);
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 10));
+    expect((await opened.result).usage).toStrictEqual(usage);
+    expect(usages).toHaveLength(1);
+    expect(pullsAfterEnd).toBe(0);
+  });
+
+  it("an abort after a break pulls nothing more and books nothing (assumption O19: break reports nothing)", async () => {
+    let closed = 0;
+    let pulledPastBreak = false;
+    const s = streaming(async function* () {
+      try {
+        yield A;
+        pulledPastBreak = true;
+        yield B;
+        return { ...zeros, characters: 2 };
+      } finally {
+        closed++;
+      }
+    });
+    const { ai, usages } = aiWith({ voice: provider("voice", { speakStream: s.speakStream }) });
+    const ac = new AbortController();
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hi.", signal: ac.signal });
+    for await (const _ of opened.audio) break;
+    expect(getEventListeners(ac.signal, "abort").length).toBe(0);
+    ac.abort();
+    expect(await settled(opened.result, 50)).toBe("pending");
+    expect(closed).toBe(1);
+    expect(pulledPastBreak).toBe(false);
+    expect(usages).toHaveLength(0);
+  });
+
+  it("the text streams do not listen on the signal: only streamed speech is billed before its first byte is read", async () => {
+    const ac = new AbortController();
+    const p: Provider = {
+      ...provider("voice", {}),
+      textStream: async function* () {
+        yield "a";
+        return { raw: "a", text: "a", usage: zeros, model: "m" };
+      },
+    };
+    const { ai } = aiWith({ voice: p });
+    const opened = await ai.stream({ model: "voice:m", prompt: "Hi.", signal: ac.signal });
+    expect(getEventListeners(ac.signal, "abort").length).toBe(0);
+    for await (const _ of opened.stream);
   });
 });

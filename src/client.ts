@@ -525,7 +525,7 @@ export function createClient(opts: ClientOptions): Client {
           throw failure;
         } finally {
           // The consumer stopped early: close the provider's stream and with it the connection (an open one
-          // holds a vendor concurrency slot). Nothing is reported for it (O19).
+          // holds a vendor concurrency slot). Nothing is reported for it, as for every coax stream left early.
           if (!finished) await opened.audio.return(emptyUsage());
         }
       }

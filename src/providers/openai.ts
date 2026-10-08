@@ -422,7 +422,7 @@ export function openai(opts: OpenAiOptions): Provider {
       const format = req.format ?? "mp3";
       const model = opts.speakModel ?? opts.model;
       // The same request as `speak`: the raw /audio/speech body is chunked as it is generated. No `stream_format`
-      // (SSE): it would need its own parser and serves gpt-4o-mini-tts only (decisions/stage-03-openai-speak-stream.md).
+      // (SSE): it would need its own parser and serves gpt-4o-mini-tts only, while the raw body streams on every model.
       const resp = await c.audio.speech.create(speechBody(req, model, format, opts.voice), requestOptions(req.headers, req.signal));
       async function* audio(): AsyncGenerator<Uint8Array, Usage, void> {
         let bytes = 0;

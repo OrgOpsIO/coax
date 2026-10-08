@@ -735,6 +735,24 @@ describe("elevenlabs speakStream through the real SDK", () => {
     expect(usages.map((u) => u.usage)).toStrictEqual([{ ...zeros, characters: 12 }]);
   });
 
+  it("an abort before anyone iterated (review R3.1): result rejects with the billed CoaxAbortError, reported once; a later iteration throws the same error", async () => {
+    const ac = new AbortController();
+    const s = streamStub(CHUNKS.slice(0, 2), "hang");
+    const { ai, usages } = voiceAI(s.client);
+    const opened = await ai.speakStream({ model: "elevenlabs:eleven_flash_v2_5", input: "Hello there.", signal: ac.signal });
+    ac.abort();
+    const err = await Promise.race([opened.result.then(() => "resolved", (e: unknown) => e), new Promise((r) => setTimeout(() => r("pending"), 1000))]);
+    expect(err).toBeInstanceOf(CoaxAbortError);
+    expect((err as CoaxAbortError).usage).toStrictEqual({ ...zeros, characters: 12 });
+    expect(billedUsage(err)).toStrictEqual({ ...zeros, characters: 12 });
+    expect(usages.map((u) => [u.usage, u.purpose])).toStrictEqual([[{ ...zeros, characters: 12 }, "speakStream"]]);
+    const later = await drainAudio(opened.audio);
+    expect(later.got).toHaveLength(1);
+    expect(later.err).toBe(err);
+    expect(usages).toHaveLength(1);
+    expect(s.seen).toHaveLength(1);
+  });
+
   it("a connection dropped after the first chunk: the marked TypeError through the iteration and result, reported once, no fallback", async () => {
     const s = streamStub(CHUNKS.slice(0, 2), "drop");
     const backup = streamStub(CHUNKS, "close");

@@ -39,8 +39,8 @@ export interface ElevenLabsOptions {
  * type-checks its libraries — ElevenLabs user or not. A real `ElevenLabsClient` fits as it is.
  */
 interface ElevenLabsClientLike {
-  // `stream` and `tokens` are optional so a hand-made client that compiled before stage 3 still compiles; a call
-  // that needs one it lacks fails with a plain Error naming it (decisions/stage-03-injected-client.md).
+  // `stream` and `tokens` are optional so a hand-made client that compiled before they existed still compiles; a
+  // call that needs one it lacks fails with a plain Error naming it, not a TypeError from deep inside.
   textToSpeech: { convert(voiceId: string, request: unknown, requestOptions?: unknown): unknown; stream?(voiceId: string, request: unknown, requestOptions?: unknown): unknown };
   speechToText: { convert(request: unknown, requestOptions?: unknown): unknown };
   tokens?: { singleUse: { create(tokenType: string, requestOptions?: unknown): unknown } };
@@ -103,8 +103,9 @@ function liftNetworkCode(err: unknown): unknown {
 }
 
 /**
- * A speech body that failed after the header: the vendor has billed what `character-cost` said (O16). An abort
- * becomes the provider's own CoaxAbortError, so the billed characters survive `abortedBy()`; anything else (undici's
+ * A speech body that failed after the header: coax books what `character-cost` said, as for a completed speech
+ * (whether ElevenLabs bills a cut-off speech is not documented). An abort becomes the provider's own
+ * CoaxAbortError, so the reported characters survive `abortedBy()`; anything else (undici's
  * "terminated" on a dropped connection) goes through as it is — not lifted, so never retried into a second bill.
  */
 function afterHeader(err: unknown, signal: AbortSignal | undefined, usage: Usage, billed: boolean): unknown {
@@ -199,7 +200,8 @@ export function elevenlabs(opts: ElevenLabsOptions): Provider {
         .catch((err: unknown) => {
           throw liftNetworkCode(err);
         });
-      // The SDK resolves at the header (measured), so the bill is known before the body is read (O16).
+      // The SDK resolves at the header (measured), so the bill is known before the body is read — and survives a
+      // body that breaks or is aborted after it.
       const billed = characters(rawResponse.headers);
       const usage: Usage = { ...emptyUsage(), ...(billed != null ? { characters: billed } : {}) };
       let audio: Uint8Array;
@@ -226,7 +228,7 @@ export function elevenlabs(opts: ElevenLabsOptions): Provider {
         .catch((err: unknown) => {
           throw liftNetworkCode(err);
         });
-      // Whether /stream sends character-cost is not documented (GUESS, smoke S3.1): when it does, it is the bill.
+      // Whether /stream sends character-cost is not documented (a guess until run live): when it does, it is the bill.
       const billed = characters(rawResponse.headers);
       const usage: Usage = { ...emptyUsage(), ...(billed != null ? { characters: billed } : {}) };
       async function* audio(): AsyncGenerator<Uint8Array, Usage, void> {
@@ -258,7 +260,8 @@ export function elevenlabs(opts: ElevenLabsOptions): Provider {
         throw liftNetworkCode(err);
       });
       if (typeof res?.token !== "string" || !res.token) throw new Error("coax: elevenlabs returned no token");
-      // Issuing has no documented cost and coax never sees the session it opens: zero units, reported once (O18).
+      // Issuing has no documented cost and coax never sees the session it opens: zero units, reported once, so an
+      // app can still count the tokens it handed out.
       return { token: res.token, url: realtimeUrl(opts.baseURL), usage: emptyUsage(), model: opts.model };
     },
 

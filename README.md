@@ -324,7 +324,8 @@ abort happened inside `ai.run()`, so an aborted run is exactly as resumable as o
 A failed call that the vendor still billed is booked the same way, whichever provider raised it: a refusal
 (`CoaxRefusalError` carries its `usage`), a Gemini turn that ended without a usable answer, an embedding
 batch cut short after some inputs, an ElevenLabs speech billed in characters that came back without audio, an
-ElevenLabs speech cut off after it was billed (a dropped connection, an abort). `onUsage` sees each once, `billedUsage(err)` returns what the failed
+ElevenLabs speech cut off after its header reported the characters (a dropped connection, an abort — coax books
+what the header said; whether ElevenLabs bills a cut-off speech is not documented). `onUsage` sees each once, `billedUsage(err)` returns what the failed
 call cost, and inside `ai.run()` or `ai.loop()` it counts toward the budget (and toward the run's usage). Such an attempt that coax retried
 is added to the `usage` of the call that finally succeeds (or rides on the error that finally escapes). A provider
 of your own marks such an error with `withBilledUsage(err, usage)`. The `onUsage` hook and any `Budget` see
@@ -510,21 +511,25 @@ res.end();
 
 It resolves once the first chunk is in, so retries and the fallback cover a vendor that fails before any
 audio; after that the speech is committed. The chunks are slices of one file in `mediaType`, cut wherever the
-network cut them. ElevenLabs bills a speech when it starts: `usage.characters` on `result` and through
-`onUsage`, present when the vendor reports it. Stop a speech early with the `signal`: the connection closes,
-and what was billed reaches `onUsage` and rides on the `CoaxAbortError`. A `break` out of the loop closes the
-connection too, but books nothing. On the OpenAI wire the audio streams as it is generated, with no usage, as
-`speak()`.
+network cut them. coax books the characters ElevenLabs reports in its response header, which arrives before
+the audio: `usage.characters` on `result` and through `onUsage`, present when the vendor sends it. Whether
+ElevenLabs bills a speech cut off early is not documented. Stop a speech early with the `signal`, whether you
+are iterating it or opened it ahead: the connection closes, and the reported characters reach `onUsage` and
+ride on the `CoaxAbortError`. A `break` out of the loop closes the connection too, but books nothing. On the
+OpenAI wire the audio streams as it is generated, with no usage, as `speak()`.
 
 **Listening in realtime.** The browser streams the microphone straight to ElevenLabs. coax's part is the
 token, issued on the server:
 
 ```ts
-app.post("/v1/listen", async (c) => {
+app.post("/v1/listen", requireUser, async (c) => {   // requireUser: your app's auth middleware
   const { token, model, url } = await ai.transcribeToken({ model: "listen" });
   return c.json({ token, model, url });
 });
 ```
+
+Keep the route behind your auth: each token opens a realtime session billed to your account, so whoever can
+fetch one spends your money — the key stays on the server, its spending power must too.
 
 The browser half, with ElevenLabs' own `@elevenlabs/client` (not a coax dependency — coax ships no browser
 code):
@@ -533,12 +538,13 @@ code):
 import { Scribe, RealtimeEvents, CommitStrategy } from "@elevenlabs/client";
 
 const { token, model, url } = await (await fetch("/v1/listen", { method: "POST" })).json();
-const scribe = Scribe.connect({ token, modelId: model, baseUri: new URL(url).origin, commitStrategy: CommitStrategy.VAD, microphone: { echoCancellation: true } });
+const scribe = Scribe.connect({ token, modelId: model, baseUri: url.slice(0, url.lastIndexOf("/v1/")), commitStrategy: CommitStrategy.VAD, microphone: { echoCancellation: true } });
 scribe.on(RealtimeEvents.COMMITTED_TRANSCRIPT, (t) => ask(t.text));
 ```
 
 The token is single-use and lives 15 minutes (the vendor's rule), and the key never leaves the server. `url`
-is the realtime endpoint of the host that issued the token, so a residency endpoint hands out its own.
+is the realtime endpoint of the host that issued the token, so a residency endpoint hands out its own;
+`baseUri` is `url` without its `/v1/…` path, so a `baseURL` with a path of its own (a proxy) carries over.
 `onUsage` sees each issued token once, with zero units: the session itself is billed by ElevenLabs by audio
 duration, and coax never sees it — no realtime message carries usage. On the OpenAI wire `transcribeToken`
 raises `CoaxUnsupportedError`: its realtime secret can be used more than once until it expires, so it is not
@@ -754,7 +760,8 @@ still sees who is asking.
 
 The same loop, streamed both ways: the browser listens with a realtime token (`/v1/listen` under Voice) and
 posts each committed transcript; the server runs the agent and speaks its answer sentence by sentence while
-the model is still writing it.
+the model is still writing it. This one is an Express route, because it writes to the response as the audio
+arrives:
 
 ```ts
 app.post("/v1/talk", async (req, res) => {
@@ -766,24 +773,30 @@ app.post("/v1/talk", async (req, res) => {
     for await (const chunk of audio) res.write(chunk);
   };
 
-  res.setHeader("content-type", "audio/mpeg");
-  const { events } = await ai.runStream({ model: "smart", prompt: req.body.text, tools, signal: ac.signal });
-  let buffer = "";
-  for await (const e of events) {
-    if (e.type !== "delta") continue;
-    buffer += e.text;
-    for (let end = buffer.search(/[.!?]\s/); end >= 0; end = buffer.search(/[.!?]\s/)) {
-      await say(buffer.slice(0, end + 1));
-      buffer = buffer.slice(end + 2);
+  try {
+    res.setHeader("content-type", "audio/mpeg");
+    const { events } = await ai.runStream({ model: "smart", prompt: req.body.text, tools, signal: ac.signal });
+    let buffer = "";
+    for await (const e of events) {
+      if (e.type !== "delta") continue;
+      buffer += e.text;
+      for (let end = buffer.search(/[.!?]\s/); end >= 0; end = buffer.search(/[.!?]\s/)) {
+        await say(buffer.slice(0, end + 1));
+        buffer = buffer.slice(end + 2);
+      }
     }
+    if (buffer.trim()) await say(buffer);   // the rest, at the end
+    res.end();
+  } catch (err) {
+    if (!(err instanceof CoaxAbortError)) throw err;   // barge-in: the listener is gone, nothing left to send
   }
-  if (buffer.trim()) await say(buffer);   // the rest, at the end
-  res.end();
 });
 ```
 
 Each sentence is its own speech: its own request and its own bill. `mp3` and `pcm` concatenate cleanly into
-one response; `wav` carries a header per speech. The abort books what was already spoken.
+one response; `wav` carries a header per speech. A barge-in ends the handler with `CoaxAbortError`: catch it as
+above, or Express 4 and plain `node:http` leave it unhandled and Node ends the process. The abort books the
+speech in progress as the vendor reported it — the whole sentence, not just the part that played.
 
 ## Design
 
