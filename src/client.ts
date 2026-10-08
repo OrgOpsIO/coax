@@ -210,7 +210,8 @@ export interface Client {
   /** Text-to-speech. Throws CoaxUnsupportedError where the endpoint has no speech synthesis. */
   speak(req: SpeakRequest): Promise<SpeakResult>;
   /** Streamed text-to-speech: resolves once the vendor accepted the request. The audio generator reports
-   *  usage when drained. Providers without `speakStream` degrade to one `speak` call, yielded as one chunk. */
+   *  usage when drained, or what was billed before the audio when left early. Providers without `speakStream`
+   *  degrade to one `speak` call, yielded as one chunk. */
   speakStream(req: SpeakRequest): Promise<SpeakStreamResponse>;
   /** A single-use token for realtime transcription in the browser. Throws CoaxUnsupportedError where the
    *  endpoint has none. */
@@ -525,8 +526,15 @@ export function createClient(opts: ClientOptions): Client {
           throw failure;
         } finally {
           // The consumer stopped early: close the provider's stream and with it the connection (an open one
-          // holds a vendor concurrency slot). Nothing is reported for it, as for every coax stream left early.
-          if (!finished) await opened.audio.return(emptyUsage());
+          // holds a vendor concurrency slot). A speech billed before its audio is booked once even so — the
+          // drained and the failed paths above never get here with `finished` unset.
+          if (!finished) {
+            try {
+              await opened.audio.return(emptyUsage());
+            } finally {
+              if (opened.billed) await onUsage?.(opened.billed, opened.model);
+            }
+          }
         }
       }
       return { mediaType: opened.mediaType, model: opened.model, audio: audio() };

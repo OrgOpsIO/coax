@@ -107,6 +107,8 @@ describe("the public declarations", () => {
         `  void type;`,
         `  return s.result;`,
         `}`,
+        // O19: a provider of its own declares a bill known before the audio, so a `break` books it.
+        `export const billedAtHeader: SpeakStreamResponse = { mediaType: "audio/mpeg", model: "m", billed: { ...emptyUsage(), characters: 12 }, audio: (async function* () { return emptyUsage(); })() };`,
         `export async function token(): Promise<string> {`,
         `  const call: TranscribeTokenCall = { model: "elevenlabs:scribe_v2_realtime", purpose: "listen" };`,
         `  const t: TranscribeTokenResponse = await ai.transcribeToken(call);`,

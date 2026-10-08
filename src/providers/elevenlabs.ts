@@ -228,7 +228,7 @@ export function elevenlabs(opts: ElevenLabsOptions): Provider {
         .catch((err: unknown) => {
           throw liftNetworkCode(err);
         });
-      // Whether /stream sends character-cost is not documented (a guess until run live): when it does, it is the bill.
+      // Whether /stream sends character-cost is not documented: when it does, it is the bill — known before the audio.
       const billed = characters(rawResponse.headers);
       const usage: Usage = { ...emptyUsage(), ...(billed != null ? { characters: billed } : {}) };
       async function* audio(): AsyncGenerator<Uint8Array, Usage, void> {
@@ -249,7 +249,7 @@ export function elevenlabs(opts: ElevenLabsOptions): Provider {
         }
         return usage;
       }
-      return { mediaType: variant.mediaType, model: opts.model, audio: audio() };
+      return { mediaType: variant.mediaType, model: opts.model, audio: audio(), ...(billed != null ? { billed: usage } : {}) };
     },
 
     async transcribeToken(req: TranscribeTokenRequest): Promise<TranscribeTokenResponse> {

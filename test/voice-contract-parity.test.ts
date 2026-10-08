@@ -222,21 +222,26 @@ describe.each(vendors)("streamed speech contract on $name (same caller code)", (
     expect(fresh.urls).toHaveLength(0);
   });
 
-  it("an early break closes the response body on the wire and books nothing (assumption O19: break reports nothing)", async () => {
-    let cancelled = false;
-    const endless: Reply = () =>
-      new Response(
-        new ReadableStream<Uint8Array>({ pull: (c) => c.enqueue(AUDIO), cancel: () => void (cancelled = true) }, { highWaterMark: 0 }),
-        { status: 200, headers: { "content-type": "audio/mpeg", "character-cost": "12" } },
-      );
-    const seen: Usage[] = [];
-    const { ai } = v.build(endless, (u) => void seen.push(u));
-    const { audio } = await ai.speakStream({ model: v.speakModel, input: "Hi." });
-    for await (const _ of audio) break;
+  it("an early break closes the response body on the wire (what it books differs by vendor: pinned below, O19)", async () => {
+    const { cancelled } = await brokenOff(v);
     expect(cancelled).toBe(true);
-    expect(seen).toStrictEqual([]);
   });
 });
+
+/** A speech whose body never ends (character-cost 12 in the header), left with `break` after the first chunk. */
+async function brokenOff(v: Vendor): Promise<{ cancelled: boolean; seen: Usage[] }> {
+  let cancelled = false;
+  const endless: Reply = () =>
+    new Response(
+      new ReadableStream<Uint8Array>({ pull: (c) => c.enqueue(AUDIO), cancel: () => void (cancelled = true) }, { highWaterMark: 0 }),
+      { status: 200, headers: { "content-type": "audio/mpeg", "character-cost": "12" } },
+    );
+  const seen: Usage[] = [];
+  const { ai } = v.build(endless, (u) => void seen.push(u));
+  const { audio } = await ai.speakStream({ model: v.speakModel, input: "Hi." });
+  for await (const _ of audio) break;
+  return { cancelled, seen };
+}
 
 describe("voice contract: what differs between the vendors, pinned (measured)", () => {
   it("an abort mid-speech carries what the vendor billed: characters on ElevenLabs, zero units on the OpenAI wire (measurer, stage 3)", async () => {
@@ -254,6 +259,12 @@ describe("voice contract: what differs between the vendors, pinned (measured)", 
     const zeros = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
     expect(await abortedUsage(vendors[0]!)).toStrictEqual({ usage: zeros, billed: undefined, seen: [] });
     expect(await abortedUsage(vendors[1]!)).toStrictEqual({ usage: { ...zeros, characters: 12 }, billed: { ...zeros, characters: 12 }, seen: [{ ...zeros, characters: 12 }] });
+  });
+
+  it("a break books what the vendor billed before the audio: characters on ElevenLabs; nothing on the OpenAI wire, which reports no usage for speech (O19)", async () => {
+    const zeros = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    expect(await brokenOff(vendors[0]!)).toStrictEqual({ cancelled: true, seen: [] });
+    expect(await brokenOff(vendors[1]!)).toStrictEqual({ cancelled: true, seen: [{ ...zeros, characters: 12 }] });
   });
 
   it("ai.transcribeToken, same caller code: ElevenLabs issues a token, the OpenAI wire refuses before the wire (measurer, stage 3)", async () => {

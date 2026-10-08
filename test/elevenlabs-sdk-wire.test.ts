@@ -796,13 +796,34 @@ describe("elevenlabs speakStream through the real SDK", () => {
     expect(s.seen).toHaveLength(1);
   });
 
-  it("an early break cancels the response body — the connection is closed (assumption O19: break reports nothing)", async () => {
+  it("an early break cancels the response body — the connection is closed — and books the header's characters once (O19)", async () => {
     const s = streamStub(CHUNKS, "close");
     const { ai, usages } = voiceAI(s.client);
     const opened = await ai.speakStream({ model: "elevenlabs:eleven_flash_v2_5", input: "Hello there." });
     for await (const _ of opened.audio) break;
     expect(s.bodies[0]!.cancelled).toBe(true);
+    expect(usages.map((u) => [u.usage, u.purpose, u.model])).toStrictEqual([[{ ...zeros, characters: 12 }, "speakStream", "eleven_flash_v2_5"]]);
+  });
+
+  it("an early break without character-cost closes the connection and books nothing — never an estimate (O19)", async () => {
+    const s = streamStub(CHUNKS, "close", {});
+    const { ai, usages } = voiceAI(s.client);
+    const opened = await ai.speakStream({ model: "elevenlabs:eleven_flash_v2_5", input: "Hello there." });
+    for await (const _ of opened.audio) break;
+    expect(s.bodies[0]!.cancelled).toBe(true);
     expect(usages).toHaveLength(0);
+  });
+
+  it("the provider declares the header's bill before any audio is read, and only when the header says one (O19)", async () => {
+    const withCost = streamStub(CHUNKS, "close");
+    const opened = await elevenlabs({ model: "eleven_flash_v2_5", client: withCost.client, voice: VOICE }).speakStream!({ input: "Hello there." });
+    expect(opened.billed).toStrictEqual({ ...zeros, characters: 12 });
+    await opened.audio.return(zeros);
+
+    const without = streamStub(CHUNKS, "close", {});
+    const bare = await elevenlabs({ model: "eleven_flash_v2_5", client: without.client, voice: VOICE }).speakStream!({ input: "Hello there." });
+    expect("billed" in bare).toBe(false);
+    await bare.audio.return(zeros);
   });
 
   it("an injected client without textToSpeech.stream names the missing member", async () => {

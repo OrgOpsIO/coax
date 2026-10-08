@@ -231,7 +231,7 @@ describe("ai.speakStream (fake providers)", () => {
     expect(usages).toHaveLength(0);
   });
 
-  it("an early break closes the provider's stream and reports nothing (assumption O19: break reports nothing)", async () => {
+  it("an early break closes the provider's stream; without a bill at the header it reports nothing (O19)", async () => {
     let closed = false;
     let pulledPastBreak = false;
     const s = streaming(async function* () {
@@ -547,7 +547,7 @@ describe("streamed speech aborted while nobody iterates it (review R3.1, fake pr
     expect(pullsAfterEnd).toBe(0);
   });
 
-  it("an abort after a break pulls nothing more and books nothing (assumption O19: break reports nothing)", async () => {
+  it("an abort after a break pulls nothing more and books nothing (no bill at the header, O19)", async () => {
     let closed = 0;
     let pulledPastBreak = false;
     const s = streaming(async function* () {
@@ -585,5 +585,208 @@ describe("streamed speech aborted while nobody iterates it (review R3.1, fake pr
     const opened = await ai.stream({ model: "voice:m", prompt: "Hi.", signal: ac.signal });
     expect(getEventListeners(ac.signal, "abort").length).toBe(0);
     for await (const _ of opened.stream);
+  });
+
+  // Fixer (stage 3, run 2), second review SR3.2: the branch for a signal that aborted between opening and handing
+  // the stream out (the second reviewer's probe P2).
+  it("a signal already aborted when the stream is handed out is drained at once: booked once, result rejects", async () => {
+    const own = withBilledUsage(new CoaxAbortError(billed), billed);
+    const ac = new AbortController();
+    const s = streaming(async function* () {
+      queueMicrotask(() => ac.abort());
+      yield A;
+      throw own;
+    });
+    const { ai, usages } = aiWith({ voice: provider("voice", { speakStream: s.speakStream }) });
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hello there.", signal: ac.signal });
+    expect(ac.signal.aborted).toBe(true);
+    expect(await settled(opened.result)).toStrictEqual({ err: own });
+    expect(usages.map((u) => u.usage)).toStrictEqual([billed]);
+  });
+});
+
+// Fixer (stage 3, run 2), human answer O19: a speech the consumer leaves with `break` (no abort) books what the
+// vendor billed before the audio, once — through the provider's `billed`, vendor-neutrally in the client layer.
+describe("streamed speech left with break books what was billed at the header (O19, fake providers)", () => {
+  const billed = { ...zeros, characters: 12 };
+  /** A speakStream member that declares `billed` at the header, as ElevenLabs does with character-cost. */
+  function billedStreaming(gen: (req: SpeakRequest) => Gen, bill: Usage | null = billed) {
+    const s = streaming(gen);
+    const speakStream = async (req: SpeakRequest): Promise<SpeakStreamResponse> => ({ ...(await s.speakStream(req)), ...(bill ? { billed: bill } : {}) });
+    return { ...s, speakStream };
+  }
+
+  it("a break after the first chunk closes the provider's stream, then reports the billed characters once; result stays pending", async () => {
+    let closed = false;
+    let closedAtReport: boolean | undefined;
+    const s = billedStreaming(async function* () {
+      try {
+        yield A;
+        yield B;
+        return billed;
+      } finally {
+        closed = true;
+      }
+    });
+    const usages: { usage: Usage; meta: CallMeta }[] = [];
+    const ai = createAI({
+      providers: { voice: () => provider("voice", { speakStream: s.speakStream }) },
+      onUsage: (usage, meta) => {
+        closedAtReport = closed;
+        usages.push({ usage, meta });
+      },
+    });
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hello there.", purpose: "reply" });
+    for await (const _ of opened.audio) break;
+    expect(usages).toStrictEqual([{ usage: billed, meta: { model: "m", provider: "voice", alias: undefined, purpose: "reply", fallback: false } }]);
+    expect(closedAtReport).toBe(true);
+    expect(await settled(opened.result, 50)).toBe("pending");
+  });
+
+  it("a break whose close fails still books the speech once, and the close's error reaches the consumer", async () => {
+    const closing = new Error("cancel failed");
+    const s = billedStreaming(async function* () {
+      try {
+        yield A;
+        yield B;
+        return billed;
+      } finally {
+        // eslint-disable-next-line no-unsafe-finally -- a provider whose close throws
+        throw closing;
+      }
+    });
+    const { ai, usages } = aiWith({ voice: provider("voice", { speakStream: s.speakStream }) });
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hello there." });
+    const err = await (async () => {
+      for await (const _ of opened.audio) break;
+    })().catch((e: unknown) => e);
+    expect(err).toBe(closing);
+    expect(usages.map((u) => u.usage)).toStrictEqual([billed]);
+  });
+
+  it("a break in the middle of the speech books it too, once", async () => {
+    const s = billedStreaming(async function* () {
+      yield A;
+      yield B;
+      yield C;
+      return billed;
+    });
+    const { ai, usages } = aiWith({ voice: provider("voice", { speakStream: s.speakStream }) });
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hello there." });
+    const got: Uint8Array[] = [];
+    for await (const c of opened.audio) {
+      got.push(c);
+      if (got.length === 2) break;
+    }
+    expect(got).toStrictEqual([A, B]);
+    expect(usages.map((u) => u.usage)).toStrictEqual([billed]);
+  });
+
+  it("a drained speech is reported once, with the generator's return value — not the header's bill a second time", async () => {
+    const atEnd = { ...zeros, characters: 13 };
+    const s = billedStreaming(async function* () {
+      yield A;
+      return atEnd;
+    });
+    const { ai, usages } = aiWith({ voice: provider("voice", { speakStream: s.speakStream }) });
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hello there." });
+    expect(await drain(opened.audio)).toStrictEqual([A]);
+    expect((await opened.result).usage).toStrictEqual(atEnd);
+    expect(usages.map((u) => u.usage)).toStrictEqual([atEnd]);
+  });
+
+  it("a speech that fails marked after the header is reported once, by its mark — a later break adds nothing", async () => {
+    const dropped = withBilledUsage(new TypeError("terminated"), billed);
+    const s = billedStreaming(async function* () {
+      yield A;
+      throw dropped;
+    });
+    const { ai, usages } = aiWith({ voice: provider("voice", { speakStream: s.speakStream }) });
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hello there." });
+    const it = opened.audio[Symbol.asyncIterator]();
+    await it.next();
+    await expect(it.next()).rejects.toBe(dropped);
+    await it.return?.();
+    expect(usages.map((u) => u.usage)).toStrictEqual([billed]);
+  });
+
+  it("an abort while nobody iterates, then a break: booked once, by the abort", async () => {
+    const own = withBilledUsage(new CoaxAbortError(billed), billed);
+    const s = billedStreaming(async function* (req) {
+      yield A;
+      if (!req.signal!.aborted) await new Promise((r) => req.signal!.addEventListener("abort", r, { once: true }));
+      throw own;
+    });
+    const { ai, usages } = aiWith({ voice: provider("voice", { speakStream: s.speakStream }) });
+    const ac = new AbortController();
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hello there.", signal: ac.signal });
+    ac.abort();
+    expect(await settled(opened.result)).toStrictEqual({ err: own });
+    for await (const _ of opened.audio) break;
+    expect(usages.map((u) => u.usage)).toStrictEqual([billed]);
+  });
+
+  // The second reviewer's SR3.1 (probe P1): the abort starts coax's drain, the consumer breaks while the drain's pull
+  // is in flight, and the source still delivers a buffered chunk. The break now books what the header said.
+  it("an abort, then a break while coax's drain pull is in flight: booked once", async () => {
+    const own = withBilledUsage(new CoaxAbortError(billed), billed);
+    let closed = false;
+    const s = billedStreaming(async function* () {
+      try {
+        yield A;
+        await new Promise((r) => setTimeout(r, 5));
+        yield B; // buffered: arrives despite the abort
+        throw own;
+      } finally {
+        closed = true;
+      }
+    });
+    const { ai, usages } = aiWith({ voice: provider("voice", { speakStream: s.speakStream }) });
+    const ac = new AbortController();
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hello there.", signal: ac.signal });
+    for await (const _ of opened.audio) {
+      ac.abort(); // the drain starts: nobody is pulling
+      break; // and the consumer leaves while its pull is in flight
+    }
+    expect(usages.map((u) => u.usage)).toStrictEqual([billed]);
+    expect(closed).toBe(true);
+  });
+
+  it("without a bill at the header a break still reports nothing — coax never estimates", async () => {
+    const s = billedStreaming(async function* () {
+      yield A;
+      yield B;
+      return billed;
+    }, null);
+    const { ai, usages } = aiWith({ voice: provider("voice", { speakStream: s.speakStream }) });
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hello there." });
+    for await (const _ of opened.audio) break;
+    expect(usages).toHaveLength(0);
+  });
+
+  it("a degraded speech (speak only) was booked at open; a break books nothing more", async () => {
+    const usage = { ...zeros, characters: 2 };
+    const { ai, usages } = aiWith({ voice: provider("voice", { speak: async () => ({ audio: A, mediaType: "audio/mpeg", usage, model: "m" }) }) });
+    const opened = await ai.speakStream({ model: "voice:m", input: "Hi." });
+    for await (const _ of opened.audio) break;
+    expect(usages.map((u) => u.usage)).toStrictEqual([usage]);
+  });
+
+  it("a break on the fallback's speech is booked with the fallback's meta", async () => {
+    const backup = billedStreaming(async function* () {
+      yield A;
+      yield B;
+      return billed;
+    });
+    const primary = streaming(async function* (): Gen {
+      throw Object.assign(new Error("busy"), { status: 400 });
+    });
+    const { ai, usages } = aiWith(
+      { voice: provider("voice", { speakStream: primary.speakStream }), backup: provider("backup", { speakStream: backup.speakStream }) },
+      { models: { mouth: { use: "voice:m", fallback: "backup:m" } } },
+    );
+    const opened = await ai.speakStream({ model: "mouth", input: "Hello there." });
+    for await (const _ of opened.audio) break;
+    expect(usages.map((u) => [u.usage, u.meta.provider, u.meta.fallback])).toStrictEqual([[billed, "backup", true]]);
   });
 });

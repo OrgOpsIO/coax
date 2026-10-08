@@ -268,6 +268,9 @@ export interface SpeakStreamResponse {
   /** MIME type of the audio, derived from the requested format — known before the first chunk. */
   mediaType: string;
   model: string;
+  /** What the call was billed, when the vendor says so before the audio (ElevenLabs: the `character-cost`
+   *  header). Reported once if the consumer stops early; absent when the bill is known only at the end, or never. */
+  billed?: Usage;
 }
 
 export interface TranscribeTokenRequest {

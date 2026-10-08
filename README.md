@@ -515,8 +515,9 @@ network cut them. coax books the characters ElevenLabs reports in its response h
 the audio: `usage.characters` on `result` and through `onUsage`, present when the vendor sends it. Whether
 ElevenLabs bills a speech cut off early is not documented. Stop a speech early with the `signal`, whether you
 are iterating it or opened it ahead: the connection closes, and the reported characters reach `onUsage` and
-ride on the `CoaxAbortError`. A `break` out of the loop closes the connection too, but books nothing. On the
-OpenAI wire the audio streams as it is generated, with no usage, as `speak()`.
+ride on the `CoaxAbortError`. A `break` out of the loop closes the connection too, and the reported characters
+reach `onUsage` once; `result` then never settles. On the OpenAI wire the audio streams as it is generated, with
+no usage, as `speak()`.
 
 **Listening in realtime.** The browser streams the microphone straight to ElevenLabs. coax's part is the
 token, issued on the server:
@@ -571,8 +572,9 @@ retried. Split long audio before you transcribe it.
 
 **Usage** comes in the vendor's billing unit, through the same `onUsage`: `usage.characters` for
 ElevenLabs speech, `usage.audioSeconds` for transcription (ElevenLabs, OpenAI whisper). Each is present
-only when the vendor reported it — never estimated. The token counts stay 0 there, and a `Budget` counts
-tokens only.
+only when the vendor reported it — never estimated. `usage.characters` is ElevenLabs' `character-cost`, not
+the length of `input`, and it can be far below it: in a live run, 10 for a 44-character sentence on
+`eleven_flash_v2_5`, 1 on `eleven_v4`. The token counts stay 0 there, and a `Budget` counts tokens only.
 
 `audio.data` takes a `Uint8Array`, `ArrayBuffer`, or a browser `Blob`/`File`. A provider without these
 routes throws `CoaxUnsupportedError` naming the missing capability — not a mystery 404. The same goes the

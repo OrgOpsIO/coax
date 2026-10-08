@@ -167,13 +167,14 @@ describe("README: ElevenLabs and voice configuration", () => {
     expect(voice).toContain("The token is single-use and lives 15 minutes (the vendor's rule), and the key never leaves the server.");
   });
 
-  it("says how streamed speech is billed and stopped (assumption O19: break books nothing)", () => {
+  it("says how streamed speech is billed and stopped (O19 answered: a break books the reported characters)", () => {
     const voice = section("### Voice");
     // Review R3.1: also for a speech opened ahead and not iterated yet. Review R3.3: what coax books, not what the vendor bills.
     expect(voice).toContain(
       "Stop a speech early with the `signal`, whether you are iterating it or opened it ahead: the connection closes, and the reported characters reach `onUsage` and ride on the `CoaxAbortError`.",
     );
-    expect(voice).toContain("A `break` out of the loop closes the connection too, but books nothing.");
+    expect(voice).toContain("A `break` out of the loop closes the connection too, and the reported characters reach `onUsage` once; `result` then never settles.");
+    expect(flat).not.toContain("but books nothing");
     expect(voice).toContain("On the OpenAI wire the audio streams as it is generated, with no usage, as `speak()`.");
   });
 
@@ -231,6 +232,7 @@ describe("README: ElevenLabs and voice configuration", () => {
       speakStream: async (req) => ({
         mediaType: "audio/mpeg",
         model: "m",
+        billed, // declared at the header, as ElevenLabs does: the abort still books it once, not twice
         audio: (async function* () {
           yield new Uint8Array([1]);
           if (!req.signal!.aborted) await new Promise((r) => req.signal!.addEventListener("abort", r, { once: true }));
@@ -266,6 +268,12 @@ describe("README: ElevenLabs and voice configuration", () => {
     expect(section("## In a backend-for-frontend")).toContain("The abort books the speech in progress as the vendor reported it — the whole sentence, not just the part that played.");
     expect(flat).not.toContain("ElevenLabs bills a speech when it starts");
     expect(flat).not.toContain("The abort books what was already spoken");
+  });
+
+  it("says usage.characters is ElevenLabs' character-cost, not the input's length (human, O15 live run)", () => {
+    expect(section("### Voice")).toContain(
+      "`usage.characters` is ElevenLabs' `character-cost`, not the length of `input`, and it can be far below it: in a live run, 10 for a 44-character sentence on `eleven_flash_v2_5`, 1 on `eleven_v4`.",
+    );
   });
 
   it("puts the token route behind the app's auth and says why (review R3.4)", () => {

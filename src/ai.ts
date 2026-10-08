@@ -155,8 +155,8 @@ export interface RunStream<T = unknown> {
 /** What `ai.speakStream()` opens: the audio as it arrives, its MIME type up front, and the bill once drained. */
 export interface SpeakStream {
   /** Encoded audio chunks in arrival order — one file in `mediaType`, cut wherever the network cut it.
-   *  Iterate exactly once. Stop early with the call's `signal` to have the speech booked; a `break` closes the
-   *  connection but reports nothing. */
+   *  Iterate exactly once. Stop early with the call's `signal` or a `break`: either closes the connection and
+   *  books what the vendor billed before the audio (`break`: through `onUsage` only — `result` never settles). */
   audio: AsyncIterable<Uint8Array>;
   /** MIME type of the audio, known before the first chunk — e.g. for the response's content-type. */
   mediaType: string;
