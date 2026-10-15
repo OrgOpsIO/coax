@@ -1,6 +1,6 @@
 {
   "name": "@orgops/coax",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Typed, provider-agnostic, self-repairing structured output from LLMs — Anthropic, OpenAI and Google Gemini built in. Pure TypeScript — no native modules, no codegen, no vendor lock-in.",
   "type": "module",
   "license": "MIT",

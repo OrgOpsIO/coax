@@ -241,10 +241,18 @@ await ai.text({ model: "classify", prompt, reasoningEffort: "low" });  // overri
 ```
 
 Sent on the wire only where set — an endpoint that has never heard of it never sees the field. OpenAI
-gets `reasoning_effort` with the literal value; Anthropic gets `thinking: { type: "enabled", budget_tokens }`
-(budget derived from the effort, capped below `max_tokens`), or no `thinking` field at all for `"none"`.
+gets `reasoning_effort` with the literal value. Anthropic gets `thinking: { type: "adaptive" }` plus
+`output_config: { effort }` on Claude 4.6+ and every Claude 5 model (they reject a fixed thinking budget),
+and `thinking: { type: "enabled", budget_tokens }` on older models (budget derived from the effort, capped
+below `max_tokens`). `"none"` sends neither field — the model runs at its own default, which on Claude 5
+models still thinks (Opus 5.5 cannot switch thinking off; its default effort is `medium`).
 Google gets `thinkingLevel` (`LOW`/`MEDIUM`/`HIGH`); `"none"` becomes `MINIMAL`, the lowest level Gemini
 has — not off.
+
+Anthropic structured output offers the schema as a tool under `tool_choice: "auto"` with an instruction to
+call it — forcing a tool is a 400 on Opus 5.5 / Sonnet 5.5 / Fable 5.1. If the model answers in text
+instead, that text goes through the normal parse-and-repair loop. A structured response cut off at
+`max_tokens` throws rather than returning the partial result: raise `maxTokens`.
 
 On Anthropic tool runs, thinking blocks round-trip automatically: they ride opaquely on the assistant
 message (`Message.providerData`) and are replayed verbatim — signature intact — on the next turn, so

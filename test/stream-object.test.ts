@@ -56,7 +56,7 @@ describe("provider structuredStream", () => {
       messages: {
         create: async () => ({ content: [] }),
         stream: (body: Record<string, unknown>) => {
-          expect(body.tool_choice).toEqual({ type: "tool", name: "output" });
+          expect(body.tool_choice).toEqual({ type: "auto", disable_parallel_tool_use: true });
           return {
             [Symbol.asyncIterator]: async function* () {
               yield* events;

@@ -146,13 +146,22 @@ function withExtraBody(body: Record<string, unknown>, endpointExtraBody: Record<
 // split at "none"/"low" vs "high" without pretending the two vendors' reasoning tokens are equivalent.
 const THINKING_BUDGETS: Record<"low" | "medium" | "high", number> = { low: 2048, medium: 8192, high: 16384 };
 
-// `"none"` sends no `thinking` field at all — Anthropic just answers directly, same as an endpoint that
-// never heard of reasoning effort. Anthropic REQUIRES budget_tokens < max_tokens (the model needs room
-// left to answer after it stops thinking) AND budget_tokens >= 1024, so the budget is capped relative
-// to whatever max_tokens this call actually resolved to — and below 2048 the two constraints can't
-// both hold, so that's a clear error here rather than a cryptic 400 from the endpoint.
-function thinkingParam(effort: ReasoningEffort | undefined, maxTokens: number): Record<string, unknown> {
+// Claude 4.6+ and every 5-generation model (incl. Fable/Mythos) think adaptively and are steered by
+// output_config.effort; a fixed budget_tokens is a 400 on all 5-generation models. Matched as a substring
+// so gateway/Bedrock spellings ("anthropic.claude-opus-5-5", "…/claude-sonnet-4-6") resolve too; the
+// lookaheads keep dated legacy ids like "claude-3-5-sonnet-20240620" on the budget path.
+const ADAPTIVE_THINKING_MODEL = /(?:opus|sonnet|haiku)-4-[6-9](?!\d)|(?:opus|sonnet|haiku|fable|mythos)-[5-9](?!\d)/;
+
+// `"none"` sends no thinking/effort field at all — the model runs at its own default (on Claude 5 models
+// that default still thinks; Opus 5.5 cannot switch thinking off). On adaptive models the effort maps 1:1
+// onto output_config.effort, with thinking set to adaptive explicitly (4.6–4.8 don't think without it).
+// Legacy models take a thinking budget instead: Anthropic REQUIRES budget_tokens < max_tokens (the model
+// needs room left to answer after it stops thinking) AND budget_tokens >= 1024, so the budget is capped
+// relative to whatever max_tokens this call actually resolved to — and below 2048 the two constraints
+// can't both hold, so that's a clear error here rather than a cryptic 400 from the endpoint.
+function thinkingParam(model: string, effort: ReasoningEffort | undefined, maxTokens: number): Record<string, unknown> {
   if (!effort || effort === "none") return {};
+  if (ADAPTIVE_THINKING_MODEL.test(model)) return { thinking: { type: "adaptive" }, output_config: { effort } };
   if (maxTokens < 2048) {
     throw new Error(
       `coax: reasoningEffort "${effort}" needs maxTokens >= 2048 on Anthropic (got ${maxTokens}) — ` +
@@ -161,6 +170,30 @@ function thinkingParam(effort: ReasoningEffort | undefined, maxTokens: number): 
   }
   const budget = Math.min(THINKING_BUDGETS[effort], maxTokens - 1024);
   return { thinking: { type: "enabled", budget_tokens: budget } };
+}
+
+// A response cut off at max_tokens carries a half-written answer — for structured output a tool input
+// with whole arrays missing that may still parse and even validate. Never hand that on as a result.
+function assertComplete(resp: AnthropicResponse, model: string, maxTokens: number): AnthropicResponse {
+  if (resp.stop_reason === "max_tokens") {
+    throw new Error(
+      `coax: ${model} hit max_tokens (${maxTokens}) before finishing the structured output — the answer is truncated. ` +
+        "Raise maxTokens (or lower reasoningEffort, since thinking spends from the same budget).",
+    );
+  }
+  return resp;
+}
+
+/** The structured result: the schema tool's input, or — if the model answered in text instead — that text,
+ *  which the client parses as JSON if it can and otherwise feeds to the repair loop as a schema failure. */
+function structuredResult(resp: AnthropicResponse): { raw: unknown; text: string } {
+  const tool = resp.content.find((b): b is { type: "tool_use"; input: unknown } => isBlock(b, "tool_use"));
+  if (tool) return { raw: tool.input, text: JSON.stringify(tool.input) };
+  const text = resp.content
+    .filter((b): b is { type: "text"; text: string } => isBlock(b, "text"))
+    .map((b) => b.text)
+    .join("");
+  return { raw: text, text };
 }
 
 // Anthropic's tool_choice spells "required" as "any"; "auto"/"none" already match its own vocabulary.
@@ -203,26 +236,8 @@ export function anthropic(opts: AnthropicOptions): Provider {
     async structured(req: StructuredRequest): Promise<ProviderResponse> {
       const c = await getClient();
       const maxTokens = req.maxTokens ?? opts.maxTokens ?? 8192;
-      const resp = await createMessage(
-        c,
-        withExtraBody(
-          {
-            model: opts.model,
-            max_tokens: maxTokens,
-            ...systemParam(req.system, req.cacheSystem),
-            tools: [{ name: req.schemaName, description: `Return a ${req.schemaName} object.`, input_schema: req.jsonSchema }],
-            tool_choice: { type: "tool", name: req.schemaName },
-            messages: toMessages(req.messages, req.cacheConversation),
-            ...thinkingParam(req.reasoningEffort, maxTokens),
-          },
-          opts.extraBody,
-          req.extraBody,
-        ),
-        requestOptions(req.headers, req.signal),
-      );
-      const tool = resp.content.find((b): b is { type: "tool_use"; input: unknown } => isBlock(b, "tool_use"));
-      const raw = tool?.input;
-      return { raw, text: raw === undefined ? "" : JSON.stringify(raw), usage: mapUsage(resp.usage), model: opts.model };
+      const resp = assertComplete(await createMessage(c, structuredBody(req, maxTokens), requestOptions(req.headers, req.signal)), opts.model, maxTokens);
+      return { ...structuredResult(resp), usage: mapUsage(resp.usage), model: opts.model };
     },
 
     async text(req: TextRequest): Promise<ProviderResponse> {
@@ -236,7 +251,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
             max_tokens: maxTokens,
             ...systemParam(req.system, req.cacheSystem),
             messages: toMessages(req.messages, req.cacheConversation),
-            ...thinkingParam(req.reasoningEffort, maxTokens),
+            ...thinkingParam(opts.model, req.reasoningEffort, maxTokens),
           },
           opts.extraBody,
           req.extraBody,
@@ -250,30 +265,13 @@ export function anthropic(opts: AnthropicOptions): Provider {
     async *structuredStream(req: StructuredRequest): AsyncGenerator<string, ProviderResponse, void> {
       const c = await getClient();
       const maxTokens = req.maxTokens ?? opts.maxTokens ?? 8192;
-      const s = c.messages.stream(
-        withExtraBody(
-          {
-            model: opts.model,
-            max_tokens: maxTokens,
-            ...systemParam(req.system, req.cacheSystem),
-            tools: [{ name: req.schemaName, description: `Return a ${req.schemaName} object.`, input_schema: req.jsonSchema }],
-            tool_choice: { type: "tool", name: req.schemaName },
-            messages: toMessages(req.messages, req.cacheConversation),
-            ...thinkingParam(req.reasoningEffort, maxTokens),
-          },
-          opts.extraBody,
-          req.extraBody,
-        ),
-        requestOptions(req.headers, req.signal),
-      );
-      // Forced tool use arrives as input_json_delta fragments — the raw JSON text of the output.
+      const s = c.messages.stream(structuredBody(req, maxTokens), requestOptions(req.headers, req.signal));
+      // The schema tool's input arrives as input_json_delta fragments — the raw JSON text of the output.
       for await (const event of s as unknown as AsyncIterable<{ type: string; delta?: { type?: string; partial_json?: string } }>) {
         if (event.type === "content_block_delta" && event.delta?.type === "input_json_delta" && event.delta.partial_json) yield event.delta.partial_json;
       }
-      const final = assertNotRefusal(await s.finalMessage(), opts.model);
-      const tool = final.content.find((b): b is { type: "tool_use"; input: unknown } => isBlock(b, "tool_use"));
-      const raw = tool?.input;
-      return { raw, text: raw === undefined ? "" : JSON.stringify(raw), usage: mapUsage(final.usage), model: opts.model };
+      const final = assertComplete(assertNotRefusal(await s.finalMessage(), opts.model), opts.model, maxTokens);
+      return { ...structuredResult(final), usage: mapUsage(final.usage), model: opts.model };
     },
 
     async *textStream(req: TextRequest): AsyncGenerator<string, ProviderResponse, void> {
@@ -286,7 +284,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
             max_tokens: maxTokens,
             ...systemParam(req.system, req.cacheSystem),
             messages: toMessages(req.messages, req.cacheConversation),
-            ...thinkingParam(req.reasoningEffort, maxTokens),
+            ...thinkingParam(opts.model, req.reasoningEffort, maxTokens),
           },
           opts.extraBody,
           req.extraBody,
@@ -321,6 +319,30 @@ export function anthropic(opts: AnthropicOptions): Provider {
     },
   };
 
+  /**
+   * The wire body of a structured call — shared by `structured()` and `structuredStream()`. The schema is
+   * offered as a tool under tool_choice "auto" plus a system instruction to call it: forcing the tool
+   * (`{ type: "tool" }`) is a 400 on Opus 5.5 / Sonnet 5.5 / Fable 5.1 and was never allowed together with
+   * thinking. If the model answers without calling it anyway, `structuredResult` hands its text on and
+   * the repair loop takes it from there.
+   */
+  function structuredBody(req: StructuredRequest, maxTokens: number): Record<string, unknown> {
+    const instruction = `Respond by calling the ${req.schemaName} tool exactly once, with the complete result as its input.`;
+    return withExtraBody(
+      {
+        model: opts.model,
+        max_tokens: maxTokens,
+        ...systemParam(req.system ? `${req.system}\n\n${instruction}` : instruction, req.cacheSystem),
+        tools: [{ name: req.schemaName, description: `Return a ${req.schemaName} object.`, input_schema: req.jsonSchema }],
+        tool_choice: { type: "auto", disable_parallel_tool_use: true },
+        messages: toMessages(req.messages, req.cacheConversation),
+        ...thinkingParam(opts.model, req.reasoningEffort, maxTokens),
+      },
+      opts.extraBody,
+      req.extraBody,
+    );
+  }
+
   /** The wire body of one tool-calling turn — shared by `tools()` and `toolsStream()`. */
   function toolsBody(req: ToolsRequest): Record<string, unknown> {
     const thinking = Boolean(req.reasoningEffort && req.reasoningEffort !== "none");
@@ -342,7 +364,7 @@ export function anthropic(opts: AnthropicOptions): Provider {
         tools: req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.jsonSchema })),
         messages: toMessages(req.messages, req.cacheConversation),
         ...toolChoiceParam(req.toolChoice),
-        ...thinkingParam(req.reasoningEffort, maxTokens),
+        ...thinkingParam(opts.model, req.reasoningEffort, maxTokens),
       },
       opts.extraBody,
       req.extraBody,

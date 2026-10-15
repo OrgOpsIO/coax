@@ -241,7 +241,9 @@ describe("conversation cache hints (anthropic)", () => {
       cacheSystem: true,
       cacheConversation: true,
     });
-    expect(sent[0]!.body.system).toEqual([{ type: "text", text: "stable rules", cache_control: EPHEMERAL }]);
+    expect(sent[0]!.body.system).toEqual([
+      { type: "text", text: "stable rules\n\nRespond by calling the output tool exactly once, with the complete result as its input.", cache_control: EPHEMERAL },
+    ]);
     const messages = sent[0]!.body.messages as { content: unknown }[];
     expect(messages[0]!.content).toEqual([{ type: "text", text: "extract", cache_control: EPHEMERAL }]);
   });
@@ -600,5 +602,70 @@ describe("cross-vendor transcripts", () => {
     await provider.tools!({ messages, tools: TOOLS });
     const assistant = (sent[0]!.body.messages as { content: unknown[] }[])[1]!;
     expect(assistant.content).toEqual([{ type: "tool_use", id: "call-1", name: "lookup", input: {} }]);
+  });
+});
+
+describe("anthropic structured output on Claude 5 models", () => {
+  const ask = { messages: [{ role: "user" as const, content: "?" }], jsonSchema: { type: "object" }, schemaName: "out" };
+
+  /** A client whose every call resolves to the given final message, capturing the body it was sent. */
+  function finalClient(final: Record<string, unknown>) {
+    const sent: Record<string, unknown>[] = [];
+    const client = {
+      messages: {
+        create: async () => final,
+        stream: (body: Record<string, unknown>) => {
+          sent.push(body);
+          return { finalMessage: async () => final, async *[Symbol.asyncIterator]() {} };
+        },
+      },
+    };
+    return { client, sent };
+  }
+
+  it("offers the schema tool under tool_choice auto (forced tool is a 400) and tells the model to call it", async () => {
+    const { client, sent } = finalClient({ content: [{ type: "tool_use", input: { a: 1 } }], stop_reason: "tool_use" });
+    const provider = anthropic({ model: "claude-opus-5-5", client: client as never });
+    const res = await provider.structured({ ...ask, system: "Be precise." });
+    expect(sent[0]!.tool_choice).toEqual({ type: "auto", disable_parallel_tool_use: true });
+    expect(sent[0]!.system).toMatch(/^Be precise\.\n\nRespond by calling the out tool exactly once/);
+    expect(res.raw).toEqual({ a: 1 });
+  });
+
+  it("hands a text answer on when the model skips the tool, so the repair loop can act", async () => {
+    const { client } = finalClient({ content: [{ type: "text", text: '{"a":2}' }], stop_reason: "end_turn" });
+    const provider = anthropic({ model: "claude-sonnet-5-5", client: client as never });
+    const res = await provider.structured(ask);
+    expect(res.raw).toBe('{"a":2}');
+  });
+
+  it("throws on stop_reason max_tokens instead of returning a truncated tool input", async () => {
+    const truncated = { content: [{ type: "tool_use", input: { rates: [1, 2] } }], stop_reason: "max_tokens" };
+    const provider = anthropic({ model: "claude-opus-5-5", client: finalClient(truncated).client as never });
+    await expect(provider.structured({ ...ask, maxTokens: 4000 })).rejects.toThrow(/hit max_tokens \(4000\)/);
+    const consume = async () => {
+      const s = provider.structuredStream!(ask);
+      let step = await s.next();
+      while (!step.done) step = await s.next();
+    };
+    await expect(consume()).rejects.toThrow(/truncated/);
+  });
+
+  it("maps reasoningEffort onto output_config.effort with adaptive thinking on 4.6+ and 5-generation models", async () => {
+    for (const model of ["claude-opus-5-5", "claude-sonnet-5-5", "anthropic.claude-opus-5-5", "claude-sonnet-4-6", "claude-fable-5-1"]) {
+      const { client, sent } = finalClient({ content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" });
+      await anthropic({ model, client: client as never }).text({ messages: [{ role: "user", content: "?" }], reasoningEffort: "medium", maxTokens: 1000 });
+      expect(sent[0]!.thinking, model).toEqual({ type: "adaptive" });
+      expect(sent[0]!.output_config, model).toEqual({ effort: "medium" });
+    }
+  });
+
+  it("keeps the thinking budget on legacy models, including dated ids", async () => {
+    for (const model of ["claude-haiku-4-5", "claude-sonnet-4-5-20250929", "claude-3-5-sonnet-20240620", "claude-opus-4-1"]) {
+      const { client, sent } = finalClient({ content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" });
+      await anthropic({ model, client: client as never }).text({ messages: [{ role: "user", content: "?" }], reasoningEffort: "low", maxTokens: 20_000 });
+      expect(sent[0]!.thinking, model).toEqual({ type: "enabled", budget_tokens: 2048 });
+      expect(sent[0]!, model).not.toHaveProperty("output_config");
+    }
   });
 });
